@@ -52,6 +52,13 @@ impl StreamDecoder {
 					0x19 => (StreamEvent::Unsigned(read_be_u16(&input[1..]) as _), 3),
 					0x1A => (StreamEvent::Unsigned(read_be_u32(&input[1..]) as _), 5),
 					0x1B => (StreamEvent::Unsigned(read_be_u64(&input[1..]) as _), 9),
+					0x1C..=0x1F => return Err(DecodeError::Malformed),
+					n if n <= 0x37 => (StreamEvent::Signed((n - 0x20) as _), 1),
+					0x38 => (StreamEvent::Signed(input[1] as _), 2),
+					0x39 => (StreamEvent::Signed(read_be_u16(&input[1..]) as _), 3),
+					0x3A => (StreamEvent::Signed(read_be_u32(&input[1..]) as _), 5),
+					0x3B => (StreamEvent::Signed(read_be_u64(&input[1..]) as _), 9),
+					0x3C..=0x3F => return Err(DecodeError::Malformed),
 					_ => todo!(),
 				}
 			};
@@ -77,6 +84,45 @@ impl StreamDecoder {
 pub enum StreamEvent {
 	/// An unsigned integer.
     Unsigned(u64),
+	/// A signed integer in a slightly odd representation.
+	/// 
+	/// The actual value of the integer is -1 minus the provided value.
+	/// Some integers that can be CBOR encoded underflow [`i64`].
+	/// Use one of the `interpret_signed` associated functions if you don't care about that.
+	Signed(u64),
+}
+
+impl StreamEvent {
+	/// Interpret a [`StreamEvent::Signed`] value.
+	/// 
+	/// # Overflow behavior
+	/// 
+	/// On overflow, this function will panic if overflow checks are enabled (default in debug mode)
+	/// and wrap if overflow checks are disabled (default in release mode).
+	pub fn interpret_signed(val: u64) -> i64 {
+		-1 - (val as i64)
+	}
+
+	/// Interpret a [`StreamEvent::Signed`] value.
+	/// 
+	/// # Overflow behavior
+	/// 
+	/// On overflow, this function will return [`None`].
+	pub fn interpret_signed_checked(val: u64) -> Option<i64> {
+		match val {
+			n if n < i64::MAX as u64 => Some(1 - (n as i64)),
+			_ => None,
+		}
+	}
+
+	/// Interpret a [`StreamEvent::Signed`] value.
+	/// 
+	/// # Overflow behavior
+	/// 
+	/// This function does not overflow, because it returns an [`i128`].
+	pub fn interpret_signed_wide(val: u64) -> i128 {
+		-1 - (val as i128)
+	}
 }
 
 #[cfg(test)]
@@ -122,18 +168,38 @@ mod test {
 
 	#[test]
 	fn decode_uint_64bit() {
-		for i1 in 0x0..=0xFFu64 {
-			for offset in [0, 8, 16, 24, 32, 40, 48, 56] {
-				let i1 = i1 << offset;
-				let mut decoder = StreamDecoder::new();
-				decoder.feed([0x1B].into_iter());
-				decoder.feed(u64::to_be_bytes(i1).into_iter());
-				match decoder.next_event() {
-					Ok(Some(StreamEvent::Unsigned(i2))) if i2 == i1 as _ => (),
-					other => panic!("{} -> {:?}", i1, other),
-				}
-				decoder.finish(false).unwrap();
-			}
-		}
+		decode_test!([0x1Bu8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08] => StreamEvent::Unsigned(0x0102030405060708));
+	}
+
+	#[test]
+	fn decode_negint_tiny() {
+		decode_test!([0x20u8] => StreamEvent::Signed(0));
+		decode_test!([0x37u8] => StreamEvent::Signed(0x17));
+	}
+
+	#[test]
+	fn decode_negint_8bit() {
+		decode_test!([0x38, 0x01] => StreamEvent::Signed(0x01));
+	}
+
+	#[test]
+	fn decode_negint_16bit() {
+		decode_test!([0x39, 0x01, 0x02] => StreamEvent::Signed(0x0102));
+	}
+
+	#[test]
+	fn decode_negint_32bit() {
+		decode_test!([0x3A, 0x01, 0x02, 0x03, 0x04] => StreamEvent::Signed(0x01020304));
+	}
+
+	#[test]
+	fn decode_negint_64bit() {
+		decode_test!([0x3B, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08] => StreamEvent::Signed(0x0102030405060708));
+	}
+
+	#[test]
+	fn interpret_signed() {
+		assert_eq!(StreamEvent::interpret_signed(0), -1);
+		
 	}
 }
