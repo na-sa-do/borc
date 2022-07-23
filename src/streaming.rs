@@ -75,6 +75,7 @@ impl StreamDecoder {
 /// An event encountered while decoding CBOR.
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
+	/// An unsigned integer.
     Unsigned(u64),
 }
 
@@ -82,64 +83,41 @@ pub enum StreamEvent {
 mod test {
 	use super::*;
 
+	macro_rules! decode_test {
+		($in:expr => $out:pat if $cond:expr) => {
+			let mut decoder = StreamDecoder::new();
+			decoder.feed($in.into_iter());
+			match decoder.next_event() {
+				Ok(Some($out)) if $cond => (),
+				other => panic!("{:?} -> {:?}", $in, other),
+			}
+			decoder.finish(false).unwrap();
+		};
+		($in:expr => $out:pat) => {
+			decode_test!($in => $out if true);
+		};
+	}
+
 	#[test]
 	fn decode_uint_tiny() {
 		for i1 in 0..=0x17u8 {
-			let mut decoder = StreamDecoder::new();
-			decoder.feed([i1].into_iter());
-			match decoder.next_event() {
-				Ok(Some(StreamEvent::Unsigned(i2))) if i2 == i1 as _ => (),
-				other => panic!("{} -> {:?}", i1, other),
-			}
-			decoder.finish(false).unwrap();
+			decode_test!([i1] => StreamEvent::Unsigned(i2) if i2 == i1 as _);
 		}
 	}
 
 	#[test]
 	fn decode_uint_8bit() {
-		for i1 in 0x0..=0xFFu8 {
-			let mut decoder = StreamDecoder::new();
-			decoder.feed([0x18, i1].into_iter());
-			match decoder.next_event() {
-				Ok(Some(StreamEvent::Unsigned(i2))) if i2 == i1 as _ => (),
-				other => panic!("{} -> {:?}", i1, other),
-			}
-			decoder.finish(false).unwrap();
-		}
+		decode_test!([0x18u8, 0x01] => StreamEvent::Unsigned(0x01));
 	}
 
 	#[test]
 	fn decode_uint_16bit() {
-		for i1 in 0x0..=0xFFu16 {
-			for offset in [0, 8] {
-				let i1 = i1 << offset;
-				let mut decoder = StreamDecoder::new();
-				decoder.feed([0x19].into_iter());
-				decoder.feed(u16::to_be_bytes(i1).into_iter());
-				match decoder.next_event() {
-					Ok(Some(StreamEvent::Unsigned(i2))) if i2 == i1 as _ => (),
-					other => panic!("{} -> {:?}", i1, other),
-				}
-				decoder.finish(false).unwrap();
-			}
-		}
+		decode_test!([0x19u8, 0x01, 0x02] => StreamEvent::Unsigned(0x0102));
 	}
 
 	#[test]
 	fn decode_uint_32bit() {
-		for i1 in 0x0..=0xFFu32 {
-			for offset in [0, 8, 16, 24] {
-				let i1 = i1 << offset;
-				let mut decoder = StreamDecoder::new();
-				decoder.feed([0x1A].into_iter());
-				decoder.feed(u32::to_be_bytes(i1).into_iter());
-				match decoder.next_event() {
-					Ok(Some(StreamEvent::Unsigned(i2))) if i2 == i1 as _ => (),
-					other => panic!("{} -> {:?}", i1, other),
-				}
-				decoder.finish(false).unwrap();
-			}
-		}
+		decode_test!([0x1Au8, 0x01, 0x02, 0x03, 0x04] => StreamEvent::Unsigned(0x01020304));
 	}
 
 	#[test]
