@@ -4,10 +4,8 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum DecodeError {
-	#[error("malformed CBOR")]
-	Malformed,
-	#[error("incomplete data")]
-	Incomplete,
-	#[error("excess data")]
-	Excess,
+    #[error("malformed CBOR")]
+    Malformed,
+    #[error("incomplete or excess data")]
+    IncompleteOrExcess,
 }
