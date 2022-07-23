@@ -21,12 +21,14 @@ fn read_be_u64(input: &[u8]) -> u64 {
 #[derive(Debug, Clone)]
 pub struct StreamDecoder {
     input_buffer: VecDeque<u8>,
+	ignore_before_next_event: usize,
 }
 
 impl StreamDecoder {
     pub fn new() -> Self {
         StreamDecoder {
             input_buffer: VecDeque::with_capacity(128),
+			ignore_before_next_event: 0,
         }
     }
 
@@ -41,6 +43,7 @@ impl StreamDecoder {
 
     /// Pull an event from the decoder.
     pub fn next_event(&mut self) -> Result<Option<StreamEvent>, DecodeError> {
+		self.input_buffer.drain(0..self.ignore_before_next_event);
         if self.input_buffer.is_empty() {
             Ok(None)
         } else {
@@ -62,7 +65,7 @@ impl StreamDecoder {
 					_ => todo!(),
 				}
 			};
-			self.input_buffer.drain(0..size);
+			self.ignore_before_next_event = size;
 			Ok(Some(event))
         }
     }
@@ -70,7 +73,8 @@ impl StreamDecoder {
     /// End the decoding.
     ///
     /// This will report an error if there is excess data and the `ignore_excess` parameter is false.
-    pub fn finish(self, ignore_excess: bool) -> Result<(), DecodeError> {
+    pub fn finish(mut self, ignore_excess: bool) -> Result<(), DecodeError> {
+		self.input_buffer.drain(0..self.ignore_before_next_event);
         if self.input_buffer.is_empty() {
 			Ok(())
 		} else {
@@ -110,7 +114,7 @@ impl StreamEvent {
 	/// On overflow, this function will return [`None`].
 	pub fn interpret_signed_checked(val: u64) -> Option<i64> {
 		match val {
-			n if n < i64::MAX as u64 => Some(1 - (n as i64)),
+			n if n < i64::MAX as u64 => Some(-1 - (n as i64)),
 			_ => None,
 		}
 	}
@@ -200,6 +204,9 @@ mod test {
 	#[test]
 	fn interpret_signed() {
 		assert_eq!(StreamEvent::interpret_signed(0), -1);
-		
+		assert_eq!(StreamEvent::interpret_signed_checked(0), Some(-1));
+		assert_eq!(StreamEvent::interpret_signed_checked(u64::MAX), None);
+		assert_eq!(StreamEvent::interpret_signed_wide(0), -1);
+		assert_eq!(StreamEvent::interpret_signed_wide(u64::MAX), -1 - u64::MAX as i128);
 	}
 }
