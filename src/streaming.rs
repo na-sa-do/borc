@@ -198,13 +198,19 @@ mod test {
 	use super::*;
 
 	macro_rules! decode_test {
+		(match $decoder:ident: $in:expr => $out:pat if $cond:expr) => {
+			match $decoder.next_event() {
+				Ok($out) if $cond => (),
+				other => panic!("{:?} -> {:?}", $in, other),
+			}
+		};
+		(match $decoder:ident: $in:expr => $out:pat) => {
+			decode_test!(match $decoder: $in => $out if true);
+		};
 		($in:expr => $out:pat if $cond:expr) => {
 			let mut decoder = StreamDecoder::new();
 			decoder.feed($in.into_iter());
-			match decoder.next_event() {
-				Ok(Some($out)) if $cond => (),
-				other => panic!("{:?} -> {:?}", $in, other),
-			}
+			decode_test!(match decoder: $in => Some($out) if $cond);
 			decoder.finish(false).unwrap();
 		};
 		($in:expr => $out:pat) => {
@@ -213,10 +219,7 @@ mod test {
 		(ref $in:expr => $out:pat if $cond:expr) => {
 			let mut decoder = StreamDecoder::new();
 			decoder.feed($in.into_iter().map(|x| *x));
-			match decoder.next_event() {
-				Ok(Some($out)) if $cond => (),
-				other => panic!("{:?} -> {:?}", $in, other),
-			}
+			decode_test!(match decoder: $in => Some($out) if $cond);
 			decoder.finish(false).unwrap();
 		};
 		(ref $in:expr => $out:pat) => {
@@ -225,20 +228,14 @@ mod test {
 		(small $in:expr) => {
 			let mut decoder = StreamDecoder::new();
 			decoder.feed($in.into_iter());
-			match decoder.next_event() {
-				Ok(None) => (),
-				other => panic!("{:?} -> {:?}", $in, other),
-			}
+			decode_test!(match decoder: $in => None);
 			// TODO
 			// decoder.finish(false).unwrap_err()
 		};
 		(small ref $in:expr) => {
 			let mut decoder = StreamDecoder::new();
 			decoder.feed($in.into_iter().map(|x| *x));
-			match decoder.next_event() {
-				Ok(None) => (),
-				other => panic!("{:?} -> {:?}", $in, other),
-			}
+			decode_test!(match decoder: $in => None);
 			// TODO
 			// decoder.finish(false).unwrap_err()
 		};
