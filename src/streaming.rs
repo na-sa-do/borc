@@ -168,7 +168,7 @@ impl StreamDecoder {
 
 /// An event encountered while decoding CBOR.
 #[derive(Debug, Clone)]
-pub enum StreamEvent<'parser> {
+pub enum StreamEvent<'a> {
 	/// An unsigned integer.
 	Unsigned(u64),
 	/// A signed integer in a slightly odd representation.
@@ -178,7 +178,7 @@ pub enum StreamEvent<'parser> {
 	/// Use one of the `interpret_signed` associated functions if you don't care about that.
 	Signed(u64),
 	/// A byte string.
-	ByteString(&'parser [u8]),
+	ByteString(&'a [u8]),
 	/// The start of a byte string whose length is unknown.
 	///
 	/// After this event come a series of `ByteString` events, followed by a `Break`.
@@ -188,7 +188,7 @@ pub enum StreamEvent<'parser> {
 	Break,
 }
 
-impl<'parser> StreamEvent<'parser> {
+impl<'a> StreamEvent<'a> {
 	/// Interpret a [`StreamEvent::Signed`] value.
 	///
 	/// # Overflow behavior
