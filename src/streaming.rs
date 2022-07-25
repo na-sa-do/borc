@@ -52,76 +52,90 @@ impl StreamDecoder {
 		} else {
 			let (event, size) = {
 				let input = input.make_contiguous();
+				macro_rules! bounds_check {
+					($bound:expr) => {
+						if input.len() < $bound {
+							return Ok(None);
+						}
+					};
+				}
+
 				match input[0] {
 					n if n <= 0x17 => (StreamEvent::Unsigned(n as _), 1),
-					0x18 => (StreamEvent::Unsigned(input[1] as _), 2),
-					0x19 => (StreamEvent::Unsigned(read_be_u16(&input[1..]) as _), 3),
-					0x1A => (StreamEvent::Unsigned(read_be_u32(&input[1..]) as _), 5),
-					0x1B => (StreamEvent::Unsigned(read_be_u64(&input[1..]) as _), 9),
+					0x18 => {
+						bounds_check!(2);
+						(StreamEvent::Unsigned(input[1] as _), 2)
+					}
+					0x19 => {
+						bounds_check!(3);
+						(StreamEvent::Unsigned(read_be_u16(&input[1..]) as _), 3)
+					}
+					0x1A => {
+						bounds_check!(5);
+						(StreamEvent::Unsigned(read_be_u32(&input[1..]) as _), 5)
+					}
+					0x1B => {
+						bounds_check!(9);
+						(StreamEvent::Unsigned(read_be_u64(&input[1..]) as _), 9)
+					}
 					0x1C..=0x1F => return Err(DecodeError::Malformed),
 					n if n <= 0x37 => (StreamEvent::Signed((n - 0x20) as _), 1),
-					0x38 => (StreamEvent::Signed(input[1] as _), 2),
-					0x39 => (StreamEvent::Signed(read_be_u16(&input[1..]) as _), 3),
-					0x3A => (StreamEvent::Signed(read_be_u32(&input[1..]) as _), 5),
-					0x3B => (StreamEvent::Signed(read_be_u64(&input[1..]) as _), 9),
+					0x38 => {
+						bounds_check!(2);
+						(StreamEvent::Signed(input[1] as _), 2)
+					}
+					0x39 => {
+						bounds_check!(3);
+						(StreamEvent::Signed(read_be_u16(&input[1..]) as _), 3)
+					}
+					0x3A => {
+						bounds_check!(5);
+						(StreamEvent::Signed(read_be_u32(&input[1..]) as _), 5)
+					}
+					0x3B => {
+						bounds_check!(9);
+						(StreamEvent::Signed(read_be_u64(&input[1..]) as _), 9)
+					}
 					0x3C..=0x3F => return Err(DecodeError::Malformed),
 					n if n <= 0x57 => {
 						let len = (n - 0x40) as usize;
-						if input.len() < len + 1 {
-							return Ok(None);
-						}
+						bounds_check!(len + 1);
 						(
 							StreamEvent::ByteString(&input[1..].split_at(len).0),
 							len + 1,
 						)
 					}
 					0x58 => {
-						if input.len() < 2 {
-							return Ok(None);
-						}
+						bounds_check!(2);
 						let len = input[1] as usize;
-						if input.len() < len + 2 {
-							return Ok(None);
-						}
+						bounds_check!(len + 2);
 						(
 							StreamEvent::ByteString(&input[2..].split_at(len).0),
 							len + 2,
 						)
 					}
 					0x59 => {
-						if input.len() < 3 {
-							return Ok(None);
-						}
+						bounds_check!(3);
 						let len = read_be_u16(&input[1..]) as _;
-						if input.len() < len + 3 {
-							return Ok(None);
-						}
+						bounds_check!(len + 3);
 						(
 							StreamEvent::ByteString(&input[3..].split_at(len).0),
 							len + 3,
 						)
 					}
 					0x5A => {
-						if input.len() < 5 {
-							return Ok(None);
-						}
+						bounds_check!(5);
 						let len = read_be_u32(&input[1..]) as _;
-						if input.len() < len + 5 {
-							return Ok(None);
-						}
+						bounds_check!(len + 5);
 						(
 							StreamEvent::ByteString(&input[5..].split_at(len).0),
 							len + 5,
 						)
 					}
 					0x5B => {
-						if input.len() < 9 {
-							return Ok(None);
-						}
+						bounds_check!(9);
 						let len = read_be_u64(&input[1..]) as _;
-						if input.len() < len + 9 {
-							return Ok(None);
-						}
+						bounds_check!(len + 9);
 						(
 							StreamEvent::ByteString(&input[9..].split_at(len).0),
 							len + 9,
@@ -277,8 +291,18 @@ mod test {
 	}
 
 	#[test]
+	fn decode_uint_8bit_bounds() {
+		decode_test!(small ref b"\x18");
+	}
+
+	#[test]
 	fn decode_uint_16bit() {
 		decode_test!([0x19u8, 0x01, 0x02] => StreamEvent::Unsigned(0x0102));
+	}
+
+	#[test]
+	fn decode_uint_16bit_bounds() {
+		decode_test!(small ref b"\x19\x00");
 	}
 
 	#[test]
@@ -287,8 +311,18 @@ mod test {
 	}
 
 	#[test]
+	fn decode_uint_32bit_bounds() {
+		decode_test!(small ref b"\x1A\x00\x00\x00");
+	}
+
+	#[test]
 	fn decode_uint_64bit() {
 		decode_test!([0x1Bu8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08] => StreamEvent::Unsigned(0x0102030405060708));
+	}
+
+	#[test]
+	fn decode_uint_64bit_bounds() {
+		decode_test!(small ref b"\x1B\x00\x00\x00\x00\x00\x00\x00");
 	}
 
 	#[test]
@@ -303,8 +337,18 @@ mod test {
 	}
 
 	#[test]
+	fn decode_negint_8bit_bounds() {
+		decode_test!(small ref b"\x38");
+	}
+
+	#[test]
 	fn decode_negint_16bit() {
 		decode_test!([0x39, 0x01, 0x02] => StreamEvent::Signed(0x0102));
+	}
+
+	#[test]
+	fn decode_negint_16bit_bounds() {
+		decode_test!(small ref b"\x39\x00");
 	}
 
 	#[test]
@@ -313,8 +357,18 @@ mod test {
 	}
 
 	#[test]
+	fn decode_negint_32bit_bounds() {
+		decode_test!(small ref b"\x3A\x00\x00\x00");
+	}
+
+	#[test]
 	fn decode_negint_64bit() {
 		decode_test!([0x3B, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08] => StreamEvent::Signed(0x0102030405060708));
+	}
+
+	#[test]
+	fn decode_negint_64bit_bounds() {
+		decode_test!(small ref b"\x3B\x00\x00\x00\x00\x00\x00\x00");
 	}
 
 	#[test]
@@ -341,8 +395,20 @@ mod test {
 	}
 
 	#[test]
+	fn decode_bytes_8bit_bounds() {
+		decode_test!(small ref b"\x58");
+		decode_test!(small ref b"\x58\x01");
+	}
+
+	#[test]
 	fn decode_bytes_16bit() {
 		decode_test!(ref b"\x59\x00\x07Goodbye" => StreamEvent::ByteString(bytes) if bytes == b"Goodbye");
+	}
+
+	#[test]
+	fn decode_bytes_16bit_bounds() {
+		decode_test!(small ref b"\x59\x00");
+		decode_test!(small ref b"\x59\x00\x01");
 	}
 
 	#[test]
@@ -351,20 +417,20 @@ mod test {
 	}
 
 	#[test]
+	fn decode_bytes_32bit_bounds() {
+		decode_test!(small ref b"\x5A\x00\x00\x00");
+		decode_test!(small ref b"\x5A\x00\x00\x00\x01");
+	}
+
+	#[test]
 	fn decode_bytes_64bit() {
 		decode_test!(ref b"\x5B\x00\x00\x00\x00\x00\x00\x00\x01?" => StreamEvent::ByteString(bytes) if bytes == b"?");
 	}
 
 	#[test]
-	fn decode_bytes_too_small() {
-		decode_test!(small ref b"\x41");
-		decode_test!(small ref b"\x58");
-		decode_test!(small ref b"\x58\x01");
-		decode_test!(small ref b"\x59\x01");
-		decode_test!(small ref b"\x59\x01\x02");
-		decode_test!(small ref b"\x5A\x01\x02\x03");
-		decode_test!(small ref b"\x5A\x01\x02\x03\x04");
-		decode_test!(small ref b"\x5B\x01\x02\x03\x04");
+	fn decode_bytes_64bit_bounds() {
+		decode_test!(small ref b"\x5B\x00\x00\x00\x00\x00\x00\x00");
+		decode_test!(small ref b"\x5B\x00\x00\x00\x00\x00\x00\x00\x01");
 	}
 
 	#[test]
