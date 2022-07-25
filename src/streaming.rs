@@ -124,6 +124,9 @@ impl StreamDecoder {
 							len + 9,
 						)
 					}
+					n if n <= 0x5E => return Err(DecodeError::Malformed),
+					0x5F => (StreamEvent::ByteStringStart, 1),
+					0xFF => (StreamEvent::Break, 1),
 					_ => todo!(),
 				}
 			};
@@ -158,6 +161,13 @@ pub enum StreamEvent<'parser> {
 	Signed(u64),
 	/// A byte string.
 	ByteString(&'parser [u8]),
+	/// The start of a byte string whose length is unknown.
+	///
+	/// After this event come a series of `ByteString` events, followed by a `Break`.
+	/// To get the true value of the byte string, concatenate the `ByteString` events together.
+	ByteStringStart,
+	/// The end of an unknown-length item.
+	Break,
 }
 
 impl<'parser> StreamEvent<'parser> {
@@ -206,6 +216,15 @@ mod test {
 		};
 		(match $decoder:ident: $in:expr => $out:pat) => {
 			decode_test!(match $decoder: $in => $out if true);
+		};
+		(match $decoder:ident: $out:pat if $cond:expr) => {
+			match $decoder.next_event() {
+				Ok($out) if $cond => (),
+				other => panic!("? -> {:?}", other),
+			}
+		};
+		(match $decoder:ident: $out:pat) => {
+			decode_test!(match $decoder: $out if true);
 		};
 		($in:expr => $out:pat if $cond:expr) => {
 			let mut decoder = StreamDecoder::new();
@@ -342,5 +361,25 @@ mod test {
 		decode_test!(small ref b"\x5A\x01\x02\x03");
 		decode_test!(small ref b"\x5A\x01\x02\x03\x04");
 		decode_test!(small ref b"\x5B\x01\x02\x03\x04");
+	}
+
+	#[test]
+	fn decode_bytes_segmented() {
+		let mut decoder = StreamDecoder::new();
+		decoder.feed(b"\x5F\x44abcd\x43efg\xFF".into_iter().map(|x| *x));
+		decode_test!(match decoder: Some(StreamEvent::ByteStringStart));
+		decode_test!(match decoder: Some(StreamEvent::ByteString(b"abcd")));
+		decode_test!(match decoder: Some(StreamEvent::ByteString(b"efg")));
+		decode_test!(match decoder: Some(StreamEvent::Break));
+	}
+
+	#[test]
+	fn decode_bytes_segmented_small() {
+		let mut decoder = StreamDecoder::new();
+		decoder.feed(b"\x5F\x44abcd".into_iter().map(|x| *x));
+		decode_test!(match decoder: Some(StreamEvent::ByteStringStart));
+		decode_test!(match decoder: Some(StreamEvent::ByteString(b"abcd")));
+		decode_test!(match decoder: None);
+		// TODO: test if the decoder doesn't finish
 	}
 }
