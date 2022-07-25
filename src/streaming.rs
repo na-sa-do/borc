@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::VecDeque;
 
 use crate::DecodeError;
@@ -20,14 +21,14 @@ fn read_be_u64(input: &[u8]) -> u64 {
 /// It does not enforce higher-level rules, instead aiming to represent the input data as faithfully as possible.
 #[derive(Debug, Clone)]
 pub struct StreamDecoder {
-	input_buffer: VecDeque<u8>,
+	input_buffer: RefCell<VecDeque<u8>>,
 	ignore_before_next_event: usize,
 }
 
 impl StreamDecoder {
 	pub fn new() -> Self {
 		StreamDecoder {
-			input_buffer: VecDeque::with_capacity(128),
+			input_buffer: RefCell::new(VecDeque::with_capacity(128)),
 			ignore_before_next_event: 0,
 		}
 	}
@@ -37,18 +38,20 @@ impl StreamDecoder {
 	/// The data provided will not be parsed until [`next_event`] is called.
 	/// The return value is the total number of bytes in the internal buffer.
 	pub fn feed(&mut self, data: impl Iterator<Item = u8>) -> usize {
-		self.input_buffer.extend(data);
-		self.input_buffer.len()
+		let input = self.input_buffer.get_mut();
+		input.extend(data);
+		input.len()
 	}
 
 	/// Pull an event from the decoder.
 	pub fn next_event(&mut self) -> Result<Option<StreamEvent>, DecodeError> {
-		self.input_buffer.drain(0..self.ignore_before_next_event);
-		if self.input_buffer.is_empty() {
+		let input = self.input_buffer.get_mut();
+		input.drain(0..self.ignore_before_next_event);
+		if input.is_empty() {
 			Ok(None)
 		} else {
 			let (event, size) = {
-				let input = self.input_buffer.make_contiguous();
+				let input = input.make_contiguous();
 				match input[0] {
 					n if n <= 0x17 => (StreamEvent::Unsigned(n as _), 1),
 					0x18 => (StreamEvent::Unsigned(input[1] as _), 2),
@@ -139,8 +142,9 @@ impl StreamDecoder {
 	///
 	/// This will report an error if there is excess data and the `ignore_excess` parameter is false.
 	pub fn finish(mut self, ignore_excess: bool) -> Result<(), DecodeError> {
-		self.input_buffer.drain(0..self.ignore_before_next_event);
-		if self.input_buffer.is_empty() {
+		let input = self.input_buffer.get_mut();
+		input.drain(0..self.ignore_before_next_event);
+		if input.is_empty() {
 			Ok(())
 		} else {
 			todo!();
