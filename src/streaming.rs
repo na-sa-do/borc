@@ -62,6 +62,53 @@ impl StreamDecoder {
 					0x3A => (StreamEvent::Signed(read_be_u32(&input[1..]) as _), 5),
 					0x3B => (StreamEvent::Signed(read_be_u64(&input[1..]) as _), 9),
 					0x3C..=0x3F => return Err(DecodeError::Malformed),
+					n if n <= 0x57 => {
+						let len = (n - 0x40) as usize;
+						if input.len() < len + 1 {
+							return Ok(None);
+						}
+						(StreamEvent::ByteString(&input[1..].split_at(len).0), len + 1)
+					},
+					0x58 => {
+						if input.len() < 2 {
+							return Ok(None);
+						}
+						let len = input[1] as usize;
+						if input.len() < len + 2 {
+							return Ok(None);
+						}
+						(StreamEvent::ByteString(&input[2..].split_at(len).0), len + 2)
+					},
+					0x59 => {
+						if input.len() < 3 {
+							return Ok(None);
+						}
+						let len = read_be_u16(&input[1..]) as _;
+						if input.len() < len + 3 {
+							return Ok(None);
+						}
+						(StreamEvent::ByteString(&input[3..].split_at(len).0), len + 3)
+					},
+					0x5A => {
+						if input.len() < 5 {
+							return Ok(None);
+						}
+						let len = read_be_u32(&input[1..]) as _;
+						if input.len() < len + 5 {
+							return Ok(None);
+						}
+						(StreamEvent::ByteString(&input[5..].split_at(len).0), len + 5)
+					}
+					0x5B => {
+						if input.len() < 9 {
+							return Ok(None);
+						}
+						let len = read_be_u64(&input[1..]) as _;
+						if input.len() < len + 9 {
+							return Ok(None);
+						}
+						(StreamEvent::ByteString(&input[9..].split_at(len).0), len + 9)
+					}
 					_ => todo!(),
 				}
 			};
@@ -85,7 +132,7 @@ impl StreamDecoder {
 
 /// An event encountered while decoding CBOR.
 #[derive(Debug, Clone)]
-pub enum StreamEvent {
+pub enum StreamEvent<'parser> {
 	/// An unsigned integer.
     Unsigned(u64),
 	/// A signed integer in a slightly odd representation.
@@ -94,9 +141,11 @@ pub enum StreamEvent {
 	/// Some integers that can be CBOR encoded underflow [`i64`].
 	/// Use one of the `interpret_signed` associated functions if you don't care about that.
 	Signed(u64),
+	/// A byte string.
+	ByteString(&'parser [u8])
 }
 
-impl StreamEvent {
+impl<'parser> StreamEvent<'parser> {
 	/// Interpret a [`StreamEvent::Signed`] value.
 	/// 
 	/// # Overflow behavior
@@ -145,6 +194,38 @@ mod test {
 		};
 		($in:expr => $out:pat) => {
 			decode_test!($in => $out if true);
+		};
+		(ref $in:expr => $out:pat if $cond:expr) => {
+			let mut decoder = StreamDecoder::new();
+			decoder.feed($in.into_iter().map(|x| *x));
+			match decoder.next_event() {
+				Ok(Some($out)) if $cond => (),
+				other => panic!("{:?} -> {:?}", $in, other),
+			}
+			decoder.finish(false).unwrap();
+		};
+		(ref $in:expr => $out:pat) => {
+			decode_test!(ref $in => $out if true);
+		};
+		(small $in:expr) => {
+			let mut decoder = StreamDecoder::new();
+			decoder.feed($in.into_iter());
+			match decoder.next_event() {
+				Ok(None) => (),
+				other => panic!("{:?} -> {:?}", $in, other),
+			}
+			// TODO
+			// decoder.finish(false).unwrap_err()
+		};
+		(small ref $in:expr) => {
+			let mut decoder = StreamDecoder::new();
+			decoder.feed($in.into_iter().map(|x| *x));
+			match decoder.next_event() {
+				Ok(None) => (),
+				other => panic!("{:?} -> {:?}", $in, other),
+			}
+			// TODO
+			// decoder.finish(false).unwrap_err()
 		};
 	}
 
@@ -208,5 +289,43 @@ mod test {
 		assert_eq!(StreamEvent::interpret_signed_checked(u64::MAX), None);
 		assert_eq!(StreamEvent::interpret_signed_wide(0), -1);
 		assert_eq!(StreamEvent::interpret_signed_wide(u64::MAX), -1 - u64::MAX as i128);
+	}
+
+	#[test]
+	fn decode_bytes_tiny() {
+		decode_test!([0x40] => StreamEvent::ByteString(bytes) if bytes.len() == 0);
+		decode_test!(ref b"\x45Hello" => StreamEvent::ByteString(bytes) if bytes == b"Hello");
+	}
+
+	#[test]
+	fn decode_bytes_8bit() {
+		decode_test!(ref b"\x58\x04Halo" => StreamEvent::ByteString(bytes) if bytes == b"Halo");
+	}
+
+	#[test]
+	fn decode_bytes_16bit() {
+		decode_test!(ref b"\x59\x00\x07Goodbye" => StreamEvent::ByteString(bytes) if bytes == b"Goodbye");
+	}
+
+	#[test]
+	fn decode_bytes_32bit() {
+		decode_test!(ref b"\x5A\x00\x00\x00\x0DLong message!" => StreamEvent::ByteString(bytes) if bytes == b"Long message!");
+	}
+
+	#[test]
+	fn decode_bytes_64bit() {
+		decode_test!(ref b"\x5B\x00\x00\x00\x00\x00\x00\x00\x01?" => StreamEvent::ByteString(bytes) if bytes == b"?");
+	}
+
+	#[test]
+	fn decode_bytes_too_small() {
+		decode_test!(small ref b"\x41");
+		decode_test!(small ref b"\x58");
+		decode_test!(small ref b"\x58\x01");
+		decode_test!(small ref b"\x59\x01");
+		decode_test!(small ref b"\x59\x01\x02");
+		decode_test!(small ref b"\x5A\x01\x02\x03");
+		decode_test!(small ref b"\x5A\x01\x02\x03\x04");
+		decode_test!(small ref b"\x5B\x01\x02\x03\x04");
 	}
 }
