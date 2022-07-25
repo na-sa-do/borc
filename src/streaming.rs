@@ -3,15 +3,15 @@ use std::collections::VecDeque;
 use crate::DecodeError;
 
 fn read_be_u16(input: &[u8]) -> u16 {
-    u16::from_be_bytes(input.split_at(2).0.try_into().unwrap())
+	u16::from_be_bytes(input.split_at(2).0.try_into().unwrap())
 }
 
 fn read_be_u32(input: &[u8]) -> u32 {
-    u32::from_be_bytes(input.split_at(4).0.try_into().unwrap())
+	u32::from_be_bytes(input.split_at(4).0.try_into().unwrap())
 }
 
 fn read_be_u64(input: &[u8]) -> u64 {
-    u64::from_be_bytes(input.split_at(8).0.try_into().unwrap())
+	u64::from_be_bytes(input.split_at(8).0.try_into().unwrap())
 }
 
 /// A streaming CBOR decoder with minimal logic.
@@ -20,35 +20,35 @@ fn read_be_u64(input: &[u8]) -> u64 {
 /// It does not enforce higher-level rules, instead aiming to represent the input data as faithfully as possible.
 #[derive(Debug, Clone)]
 pub struct StreamDecoder {
-    input_buffer: VecDeque<u8>,
+	input_buffer: VecDeque<u8>,
 	ignore_before_next_event: usize,
 }
 
 impl StreamDecoder {
-    pub fn new() -> Self {
-        StreamDecoder {
-            input_buffer: VecDeque::with_capacity(128),
+	pub fn new() -> Self {
+		StreamDecoder {
+			input_buffer: VecDeque::with_capacity(128),
 			ignore_before_next_event: 0,
-        }
-    }
+		}
+	}
 
-    /// Feed some data into the decoder.
-    ///
-    /// The data provided will not be parsed until [`next_event`] is called.
-    /// The return value is the total number of bytes in the internal buffer.
-    pub fn feed(&mut self, data: impl Iterator<Item = u8>) -> usize {
-        self.input_buffer.extend(data);
-        self.input_buffer.len()
-    }
+	/// Feed some data into the decoder.
+	///
+	/// The data provided will not be parsed until [`next_event`] is called.
+	/// The return value is the total number of bytes in the internal buffer.
+	pub fn feed(&mut self, data: impl Iterator<Item = u8>) -> usize {
+		self.input_buffer.extend(data);
+		self.input_buffer.len()
+	}
 
-    /// Pull an event from the decoder.
-    pub fn next_event(&mut self) -> Result<Option<StreamEvent>, DecodeError> {
+	/// Pull an event from the decoder.
+	pub fn next_event(&mut self) -> Result<Option<StreamEvent>, DecodeError> {
 		self.input_buffer.drain(0..self.ignore_before_next_event);
-        if self.input_buffer.is_empty() {
-            Ok(None)
-        } else {
-            let (event, size) = {
-            	let input = self.input_buffer.make_contiguous();
+		if self.input_buffer.is_empty() {
+			Ok(None)
+		} else {
+			let (event, size) = {
+				let input = self.input_buffer.make_contiguous();
 				match input[0] {
 					n if n <= 0x17 => (StreamEvent::Unsigned(n as _), 1),
 					0x18 => (StreamEvent::Unsigned(input[1] as _), 2),
@@ -67,8 +67,11 @@ impl StreamDecoder {
 						if input.len() < len + 1 {
 							return Ok(None);
 						}
-						(StreamEvent::ByteString(&input[1..].split_at(len).0), len + 1)
-					},
+						(
+							StreamEvent::ByteString(&input[1..].split_at(len).0),
+							len + 1,
+						)
+					}
 					0x58 => {
 						if input.len() < 2 {
 							return Ok(None);
@@ -77,8 +80,11 @@ impl StreamDecoder {
 						if input.len() < len + 2 {
 							return Ok(None);
 						}
-						(StreamEvent::ByteString(&input[2..].split_at(len).0), len + 2)
-					},
+						(
+							StreamEvent::ByteString(&input[2..].split_at(len).0),
+							len + 2,
+						)
+					}
 					0x59 => {
 						if input.len() < 3 {
 							return Ok(None);
@@ -87,8 +93,11 @@ impl StreamDecoder {
 						if input.len() < len + 3 {
 							return Ok(None);
 						}
-						(StreamEvent::ByteString(&input[3..].split_at(len).0), len + 3)
-					},
+						(
+							StreamEvent::ByteString(&input[3..].split_at(len).0),
+							len + 3,
+						)
+					}
 					0x5A => {
 						if input.len() < 5 {
 							return Ok(None);
@@ -97,7 +106,10 @@ impl StreamDecoder {
 						if input.len() < len + 5 {
 							return Ok(None);
 						}
-						(StreamEvent::ByteString(&input[5..].split_at(len).0), len + 5)
+						(
+							StreamEvent::ByteString(&input[5..].split_at(len).0),
+							len + 5,
+						)
 					}
 					0x5B => {
 						if input.len() < 9 {
@@ -107,49 +119,52 @@ impl StreamDecoder {
 						if input.len() < len + 9 {
 							return Ok(None);
 						}
-						(StreamEvent::ByteString(&input[9..].split_at(len).0), len + 9)
+						(
+							StreamEvent::ByteString(&input[9..].split_at(len).0),
+							len + 9,
+						)
 					}
 					_ => todo!(),
 				}
 			};
 			self.ignore_before_next_event = size;
 			Ok(Some(event))
-        }
-    }
+		}
+	}
 
-    /// End the decoding.
-    ///
-    /// This will report an error if there is excess data and the `ignore_excess` parameter is false.
-    pub fn finish(mut self, ignore_excess: bool) -> Result<(), DecodeError> {
+	/// End the decoding.
+	///
+	/// This will report an error if there is excess data and the `ignore_excess` parameter is false.
+	pub fn finish(mut self, ignore_excess: bool) -> Result<(), DecodeError> {
 		self.input_buffer.drain(0..self.ignore_before_next_event);
-        if self.input_buffer.is_empty() {
+		if self.input_buffer.is_empty() {
 			Ok(())
 		} else {
 			todo!();
 		}
-    }
+	}
 }
 
 /// An event encountered while decoding CBOR.
 #[derive(Debug, Clone)]
 pub enum StreamEvent<'parser> {
 	/// An unsigned integer.
-    Unsigned(u64),
+	Unsigned(u64),
 	/// A signed integer in a slightly odd representation.
-	/// 
+	///
 	/// The actual value of the integer is -1 minus the provided value.
 	/// Some integers that can be CBOR encoded underflow [`i64`].
 	/// Use one of the `interpret_signed` associated functions if you don't care about that.
 	Signed(u64),
 	/// A byte string.
-	ByteString(&'parser [u8])
+	ByteString(&'parser [u8]),
 }
 
 impl<'parser> StreamEvent<'parser> {
 	/// Interpret a [`StreamEvent::Signed`] value.
-	/// 
+	///
 	/// # Overflow behavior
-	/// 
+	///
 	/// On overflow, this function will panic if overflow checks are enabled (default in debug mode)
 	/// and wrap if overflow checks are disabled (default in release mode).
 	pub fn interpret_signed(val: u64) -> i64 {
@@ -157,9 +172,9 @@ impl<'parser> StreamEvent<'parser> {
 	}
 
 	/// Interpret a [`StreamEvent::Signed`] value.
-	/// 
+	///
 	/// # Overflow behavior
-	/// 
+	///
 	/// On overflow, this function will return [`None`].
 	pub fn interpret_signed_checked(val: u64) -> Option<i64> {
 		match val {
@@ -169,9 +184,9 @@ impl<'parser> StreamEvent<'parser> {
 	}
 
 	/// Interpret a [`StreamEvent::Signed`] value.
-	/// 
+	///
 	/// # Overflow behavior
-	/// 
+	///
 	/// This function does not overflow, because it returns an [`i128`].
 	pub fn interpret_signed_wide(val: u64) -> i128 {
 		-1 - (val as i128)
@@ -288,7 +303,10 @@ mod test {
 		assert_eq!(StreamEvent::interpret_signed_checked(0), Some(-1));
 		assert_eq!(StreamEvent::interpret_signed_checked(u64::MAX), None);
 		assert_eq!(StreamEvent::interpret_signed_wide(0), -1);
-		assert_eq!(StreamEvent::interpret_signed_wide(u64::MAX), -1 - u64::MAX as i128);
+		assert_eq!(
+			StreamEvent::interpret_signed_wide(u64::MAX),
+			-1 - u64::MAX as i128
+		);
 	}
 
 	#[test]
