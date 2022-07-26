@@ -484,9 +484,13 @@ mod test {
 		let mut decoder = StreamDecoder::new();
 		decoder.feed(b"\x5F\x44abcd\x43efg\xFF".into_iter().map(|x| *x));
 		decode_test!(match decoder: Some(StreamEvent::UnknownLengthByteStringStart));
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Some(StreamEvent::ByteString(b"abcd")));
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Some(StreamEvent::ByteString(b"efg")));
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Some(StreamEvent::Break));
+		assert!(decoder.ready_to_finish());
 	}
 
 	#[test]
@@ -554,9 +558,13 @@ mod test {
 		let mut decoder = StreamDecoder::new();
 		decoder.feed(b"\x7F\x64abcd\x63efg\xFF".into_iter().map(|x| *x));
 		decode_test!(match decoder: Some(StreamEvent::UnknownLengthTextStringStart));
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Some(StreamEvent::TextString("abcd")));
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Some(StreamEvent::TextString("efg")));
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Some(StreamEvent::Break));
+		assert!(decoder.ready_to_finish());
 	}
 
 	#[test]
