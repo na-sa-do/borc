@@ -24,14 +24,19 @@ fn read_be_u64(input: &[u8]) -> u64 {
 pub struct StreamDecoder {
 	// the usize is the number of bytes to drain from the buffer before doing anything else
 	input_buffer: RefCell<(VecDeque<u8>, usize)>,
-	pending_breaks: u64,
+	pending: Vec<Pending>,
+}
+
+#[derive(Debug, Clone)]
+enum Pending {
+	Break,
 }
 
 impl StreamDecoder {
 	pub fn new() -> Self {
 		StreamDecoder {
 			input_buffer: RefCell::new((VecDeque::with_capacity(128), 0)),
-			pending_breaks: 0,
+			pending: Vec::new(),
 		}
 	}
 
@@ -129,7 +134,7 @@ impl StreamDecoder {
 								)
 							}
 							None => {
-								self.pending_breaks += 1;
+								self.pending.push(Pending::Break);
 								(StreamEvent::UnknownLengthByteStringStart, 1)
 							}
 						}
@@ -149,7 +154,7 @@ impl StreamDecoder {
 								)
 							}
 							None => {
-								self.pending_breaks += 1;
+								self.pending.push(Pending::Break);
 								(StreamEvent::UnknownLengthTextStringStart, 1)
 							}
 						}
@@ -158,7 +163,13 @@ impl StreamDecoder {
 					7 => match additional {
 						0..=27 => todo!(),
 						28..=30 => return Err(DecodeError::Malformed),
-						31 => (StreamEvent::Break, 1),
+						31 => {
+							match self.pending.pop() {
+								Some(Pending::Break) => (),
+								_ => return Err(DecodeError::Malformed),
+							}
+							(StreamEvent::Break, 1)
+						}
 						31..=u8::MAX => unreachable!(),
 					},
 					8..=u8::MAX => unreachable!(),
@@ -177,7 +188,7 @@ impl StreamDecoder {
 		input.0.drain(0..to_drain);
 		input.1 = 0;
 
-		if input.0.is_empty() && self.pending_breaks == 0 {
+		if input.0.is_empty() && self.pending.is_empty() {
 			return true;
 		} else {
 			return false;
