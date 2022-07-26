@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::str::from_utf8 as str_from_utf8;
 
 use crate::DecodeError;
 
@@ -148,6 +149,65 @@ impl StreamDecoder {
 						self.pending_breaks += 1;
 						(StreamEvent::ByteStringStart, 1)
 					}
+					n if n <= 0x77 => {
+						let len = (n - 0x60) as usize;
+						bounds_check!(len + 1);
+						let body_bytes = *(&input[1..].split_at(len).0);
+						let body = match str_from_utf8(body_bytes) {
+							Ok(s) => s,
+							Err(e) => return Err(DecodeError::InvalidUtf8(e)),
+						};
+						(StreamEvent::TextString(body), len + 1)
+					}
+					0x78 => {
+						bounds_check!(2);
+						let len = input[1] as usize;
+						bounds_check!(len + 2);
+						let body_bytes = *(&input[2..].split_at(len).0);
+						let body = match str_from_utf8(body_bytes) {
+							Ok(s) => s,
+							Err(e) => return Err(DecodeError::InvalidUtf8(e)),
+						};
+						(StreamEvent::TextString(body), len + 2)
+					}
+					0x79 => {
+						bounds_check!(3);
+						let len = read_be_u16(&input[1..]) as _;
+						bounds_check!(len + 3);
+						let body_bytes = *(&input[3..].split_at(len).0);
+						let body = match str_from_utf8(body_bytes) {
+							Ok(s) => s,
+							Err(e) => return Err(DecodeError::InvalidUtf8(e)),
+						};
+						(StreamEvent::TextString(body), len + 3)
+					}
+					0x7A => {
+						bounds_check!(5);
+						let len = read_be_u32(&input[1..]) as _;
+						bounds_check!(len + 5);
+						let body_bytes = *(&input[5..].split_at(len).0);
+						let body = match str_from_utf8(body_bytes) {
+							Ok(s) => s,
+							Err(e) => return Err(DecodeError::InvalidUtf8(e)),
+						};
+						(StreamEvent::TextString(body), len + 5)
+					}
+					0x7B => {
+						bounds_check!(9);
+						let len = read_be_u64(&input[1..]) as _;
+						bounds_check!(len + 9);
+						let body_bytes = *(&input[9..].split_at(len).0);
+						let body = match str_from_utf8(body_bytes) {
+							Ok(s) => s,
+							Err(e) => return Err(DecodeError::InvalidUtf8(e)),
+						};
+						(StreamEvent::TextString(body), len + 9)
+					}
+					n if n <= 0x5E => return Err(DecodeError::Malformed),
+					0x7F => {
+						self.pending_breaks += 1;
+						(StreamEvent::TextStringStart, 1)
+					}
 					0xFF => match self.pending_breaks {
 						0 => return Err(DecodeError::Malformed),
 						_ => {
@@ -208,6 +268,13 @@ pub enum StreamEvent<'a> {
 	/// After this event come a series of `ByteString` events, followed by a `Break`.
 	/// To get the true value of the byte string, concatenate the `ByteString` events together.
 	ByteStringStart,
+	/// A text string.
+	TextString(&'a str),
+	/// The start of a text string whose length is unknown.
+	///
+	/// After this event come a series of `TextString` events, followed by a `Break`.
+	/// To get the true value of the text string, concatenate the `TextString` events together.
+	TextStringStart,
 	/// The end of an unknown-length item.
 	Break,
 }
@@ -471,6 +538,76 @@ mod test {
 		decoder.feed(b"\x5F\x44abcd".into_iter().map(|x| *x));
 		decode_test!(match decoder: Some(StreamEvent::ByteStringStart));
 		decode_test!(match decoder: Some(StreamEvent::ByteString(b"abcd")));
+		decode_test!(match decoder: None);
+		assert!(!decoder.ready_to_finish());
+	}
+
+	#[test]
+	fn decode_text_tiny() {
+		decode_test!([0x60] => StreamEvent::TextString(text) if text.len() == 0);
+		decode_test!(ref b"\x65Hello" => StreamEvent::TextString(text) if text == "Hello");
+	}
+
+	#[test]
+	fn decode_text_8bit() {
+		decode_test!(ref b"\x78\x04Halo" => StreamEvent::TextString(text) if text == "Halo");
+	}
+
+	#[test]
+	fn decode_text_8bit_bounds() {
+		decode_test!(small ref b"\x78");
+		decode_test!(small ref b"\x78\x01");
+	}
+
+	#[test]
+	fn decode_text_16bit() {
+		decode_test!(ref b"\x79\x00\x07Goodbye" => StreamEvent::TextString(text) if text == "Goodbye");
+	}
+
+	#[test]
+	fn decode_text_16bit_bounds() {
+		decode_test!(small ref b"\x79\x00");
+		decode_test!(small ref b"\x79\x00\x01");
+	}
+
+	#[test]
+	fn decode_text_32bit() {
+		decode_test!(ref b"\x7A\x00\x00\x00\x0DLong message!" => StreamEvent::TextString(text) if text == "Long message!");
+	}
+
+	#[test]
+	fn decode_text_32bit_bounds() {
+		decode_test!(small ref b"\x7A\x00\x00\x00");
+		decode_test!(small ref b"\x7A\x00\x00\x00\x01");
+	}
+
+	#[test]
+	fn decode_text_64bit() {
+		decode_test!(ref b"\x7B\x00\x00\x00\x00\x00\x00\x00\x01?" => StreamEvent::TextString(text) if text == "?");
+	}
+
+	#[test]
+	fn decode_text_64bit_bounds() {
+		decode_test!(small ref b"\x7B\x00\x00\x00\x00\x00\x00\x00");
+		decode_test!(small ref b"\x7B\x00\x00\x00\x00\x00\x00\x00\x01");
+	}
+
+	#[test]
+	fn decode_text_segmented() {
+		let mut decoder = StreamDecoder::new();
+		decoder.feed(b"\x7F\x64abcd\x63efg\xFF".into_iter().map(|x| *x));
+		decode_test!(match decoder: Some(StreamEvent::TextStringStart));
+		decode_test!(match decoder: Some(StreamEvent::TextString("abcd")));
+		decode_test!(match decoder: Some(StreamEvent::TextString("efg")));
+		decode_test!(match decoder: Some(StreamEvent::Break));
+	}
+
+	#[test]
+	fn decode_text_segmented_small() {
+		let mut decoder = StreamDecoder::new();
+		decoder.feed(b"\x7F\x64abcd".into_iter().map(|x| *x));
+		decode_test!(match decoder: Some(StreamEvent::TextStringStart));
+		decode_test!(match decoder: Some(StreamEvent::TextString("abcd")));
 		decode_test!(match decoder: None);
 		assert!(!decoder.ready_to_finish());
 	}

@@ -1,3 +1,5 @@
+use std::str::Utf8Error;
+
 use thiserror::Error;
 
 /// Errors that can occur when decoding CBOR.
@@ -8,4 +10,6 @@ pub enum DecodeError {
 	Malformed,
 	#[error("incomplete or excess data")]
 	IncompleteOrExcess,
+	#[error("invalid UTF-8: {0}")]
+	InvalidUtf8(Utf8Error),
 }
