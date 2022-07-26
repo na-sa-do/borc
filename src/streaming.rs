@@ -21,15 +21,14 @@ fn read_be_u64(input: &[u8]) -> u64 {
 /// It does not enforce higher-level rules, instead aiming to represent the input data as faithfully as possible.
 #[derive(Debug, Clone)]
 pub struct StreamDecoder {
-	input_buffer: RefCell<VecDeque<u8>>,
-	ignore_before_next_event: usize,
+	// the usize is the number of bytes to drain from the buffer before doing anything else
+	input_buffer: RefCell<(VecDeque<u8>, usize)>,
 }
 
 impl StreamDecoder {
 	pub fn new() -> Self {
 		StreamDecoder {
-			input_buffer: RefCell::new(VecDeque::with_capacity(128)),
-			ignore_before_next_event: 0,
+			input_buffer: RefCell::new((VecDeque::with_capacity(128), 0)),
 		}
 	}
 
@@ -39,19 +38,20 @@ impl StreamDecoder {
 	/// The return value is the total number of bytes in the internal buffer.
 	pub fn feed(&mut self, data: impl Iterator<Item = u8>) -> usize {
 		let input = self.input_buffer.get_mut();
-		input.extend(data);
-		input.len()
+		input.0.extend(data);
+		input.0.len()
 	}
 
 	/// Pull an event from the decoder.
 	pub fn next_event(&mut self) -> Result<Option<StreamEvent>, DecodeError> {
 		let input = self.input_buffer.get_mut();
-		input.drain(0..self.ignore_before_next_event);
-		if input.is_empty() {
+		input.0.drain(0..input.1);
+		input.1 = 0;
+		if input.0.is_empty() {
 			Ok(None)
 		} else {
 			let (event, size) = {
-				let input = input.make_contiguous();
+				let input = input.0.make_contiguous();
 				macro_rules! bounds_check {
 					($bound:expr) => {
 						if input.len() < $bound {
@@ -147,18 +147,32 @@ impl StreamDecoder {
 					_ => todo!(),
 				}
 			};
-			self.ignore_before_next_event = size;
+			input.1 = size;
 			Ok(Some(event))
+		}
+	}
+
+	/// Check whether it is possible to end the decoding now.
+	pub fn ready_to_finish(&self) -> bool {
+		let mut input = self.input_buffer.borrow_mut();
+		// for some reason Rust doesn't like this if you get rid of the temporary
+		let to_drain = input.1;
+		input.0.drain(0..to_drain);
+		input.1 = 0;
+
+		if input.0.is_empty() {
+			// TODO: account for pending breaks
+			return true;
+		} else {
+			return false;
 		}
 	}
 
 	/// End the decoding.
 	///
 	/// This will report an error if there is excess data and the `ignore_excess` parameter is false.
-	pub fn finish(mut self, ignore_excess: bool) -> Result<(), DecodeError> {
-		let input = self.input_buffer.get_mut();
-		input.drain(0..self.ignore_before_next_event);
-		if input.is_empty() {
+	pub fn finish(self, ignore_excess: bool) -> Result<(), DecodeError> {
+		if self.ready_to_finish() {
 			Ok(())
 		} else {
 			todo!();
