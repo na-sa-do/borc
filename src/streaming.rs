@@ -23,12 +23,14 @@ fn read_be_u64(input: &[u8]) -> u64 {
 pub struct StreamDecoder {
 	// the usize is the number of bytes to drain from the buffer before doing anything else
 	input_buffer: RefCell<(VecDeque<u8>, usize)>,
+	pending_breaks: u64,
 }
 
 impl StreamDecoder {
 	pub fn new() -> Self {
 		StreamDecoder {
 			input_buffer: RefCell::new((VecDeque::with_capacity(128), 0)),
+			pending_breaks: 0,
 		}
 	}
 
@@ -142,8 +144,17 @@ impl StreamDecoder {
 						)
 					}
 					n if n <= 0x5E => return Err(DecodeError::Malformed),
-					0x5F => (StreamEvent::ByteStringStart, 1),
-					0xFF => (StreamEvent::Break, 1),
+					0x5F => {
+						self.pending_breaks += 1;
+						(StreamEvent::ByteStringStart, 1)
+					}
+					0xFF => match self.pending_breaks {
+						0 => return Err(DecodeError::Malformed),
+						_ => {
+							self.pending_breaks -= 1;
+							(StreamEvent::Break, 1)
+						}
+					},
 					_ => todo!(),
 				}
 			};
@@ -160,8 +171,7 @@ impl StreamDecoder {
 		input.0.drain(0..to_drain);
 		input.1 = 0;
 
-		if input.0.is_empty() {
-			// TODO: account for pending breaks
+		if input.0.is_empty() && self.pending_breaks == 0 {
 			return true;
 		} else {
 			return false;
@@ -280,15 +290,13 @@ mod test {
 			let mut decoder = StreamDecoder::new();
 			decoder.feed($in.into_iter());
 			decode_test!(match decoder: $in => None);
-			// TODO
-			// decoder.finish(false).unwrap_err()
+			assert!(!decoder.ready_to_finish());
 		};
 		(small ref $in:expr) => {
 			let mut decoder = StreamDecoder::new();
 			decoder.feed($in.into_iter().map(|x| *x));
 			decode_test!(match decoder: $in => None);
-			// TODO
-			// decoder.finish(false).unwrap_err()
+			assert!(!decoder.ready_to_finish());
 		};
 	}
 
@@ -464,6 +472,6 @@ mod test {
 		decode_test!(match decoder: Some(StreamEvent::ByteStringStart));
 		decode_test!(match decoder: Some(StreamEvent::ByteString(b"abcd")));
 		decode_test!(match decoder: None);
-		// TODO: test if the decoder doesn't finish
+		assert!(!decoder.ready_to_finish());
 	}
 }
