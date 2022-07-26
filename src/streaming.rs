@@ -55,167 +55,113 @@ impl StreamDecoder {
 		} else {
 			let (event, size) = {
 				let input = input.0.make_contiguous();
+				let initial = input[0];
+				let excess = &input[1..];
+				let major = initial >> 5;
+				let additional = initial & 0b11111;
+
 				macro_rules! bounds_check {
 					($bound:expr) => {
-						if input.len() < $bound {
+						if excess.len() < $bound {
 							return Ok(None);
 						}
 					};
 				}
 
-				match input[0] {
-					n if n <= 0x17 => (StreamEvent::Unsigned(n as _), 1),
-					0x18 => {
-						bounds_check!(2);
-						(StreamEvent::Unsigned(input[1] as _), 2)
-					}
-					0x19 => {
-						bounds_check!(3);
-						(StreamEvent::Unsigned(read_be_u16(&input[1..]) as _), 3)
-					}
-					0x1A => {
-						bounds_check!(5);
-						(StreamEvent::Unsigned(read_be_u32(&input[1..]) as _), 5)
-					}
-					0x1B => {
-						bounds_check!(9);
-						(StreamEvent::Unsigned(read_be_u64(&input[1..]) as _), 9)
-					}
-					0x1C..=0x1F => return Err(DecodeError::Malformed),
-					n if n <= 0x37 => (StreamEvent::Signed((n - 0x20) as _), 1),
-					0x38 => {
-						bounds_check!(2);
-						(StreamEvent::Signed(input[1] as _), 2)
-					}
-					0x39 => {
-						bounds_check!(3);
-						(StreamEvent::Signed(read_be_u16(&input[1..]) as _), 3)
-					}
-					0x3A => {
-						bounds_check!(5);
-						(StreamEvent::Signed(read_be_u32(&input[1..]) as _), 5)
-					}
-					0x3B => {
-						bounds_check!(9);
-						(StreamEvent::Signed(read_be_u64(&input[1..]) as _), 9)
-					}
-					0x3C..=0x3F => return Err(DecodeError::Malformed),
-					n if n <= 0x57 => {
-						let len = (n - 0x40) as usize;
-						bounds_check!(len + 1);
-						(
-							StreamEvent::ByteString(&input[1..].split_at(len).0),
-							len + 1,
-						)
-					}
-					0x58 => {
-						bounds_check!(2);
-						let len = input[1] as usize;
-						bounds_check!(len + 2);
-						(
-							StreamEvent::ByteString(&input[2..].split_at(len).0),
-							len + 2,
-						)
-					}
-					0x59 => {
-						bounds_check!(3);
-						let len = read_be_u16(&input[1..]) as _;
-						bounds_check!(len + 3);
-						(
-							StreamEvent::ByteString(&input[3..].split_at(len).0),
-							len + 3,
-						)
-					}
-					0x5A => {
-						bounds_check!(5);
-						let len = read_be_u32(&input[1..]) as _;
-						bounds_check!(len + 5);
-						(
-							StreamEvent::ByteString(&input[5..].split_at(len).0),
-							len + 5,
-						)
-					}
-					0x5B => {
-						bounds_check!(9);
-						let len = read_be_u64(&input[1..]) as _;
-						bounds_check!(len + 9);
-						(
-							StreamEvent::ByteString(&input[9..].split_at(len).0),
-							len + 9,
-						)
-					}
-					n if n <= 0x5E => return Err(DecodeError::Malformed),
-					0x5F => {
-						self.pending_breaks += 1;
-						(StreamEvent::ByteStringStart, 1)
-					}
-					n if n <= 0x77 => {
-						let len = (n - 0x60) as usize;
-						bounds_check!(len + 1);
-						let body_bytes = *(&input[1..].split_at(len).0);
-						let body = match str_from_utf8(body_bytes) {
-							Ok(s) => s,
-							Err(e) => return Err(DecodeError::InvalidUtf8(e)),
-						};
-						(StreamEvent::TextString(body), len + 1)
-					}
-					0x78 => {
-						bounds_check!(2);
-						let len = input[1] as usize;
-						bounds_check!(len + 2);
-						let body_bytes = *(&input[2..].split_at(len).0);
-						let body = match str_from_utf8(body_bytes) {
-							Ok(s) => s,
-							Err(e) => return Err(DecodeError::InvalidUtf8(e)),
-						};
-						(StreamEvent::TextString(body), len + 2)
-					}
-					0x79 => {
-						bounds_check!(3);
-						let len = read_be_u16(&input[1..]) as _;
-						bounds_check!(len + 3);
-						let body_bytes = *(&input[3..].split_at(len).0);
-						let body = match str_from_utf8(body_bytes) {
-							Ok(s) => s,
-							Err(e) => return Err(DecodeError::InvalidUtf8(e)),
-						};
-						(StreamEvent::TextString(body), len + 3)
-					}
-					0x7A => {
-						bounds_check!(5);
-						let len = read_be_u32(&input[1..]) as _;
-						bounds_check!(len + 5);
-						let body_bytes = *(&input[5..].split_at(len).0);
-						let body = match str_from_utf8(body_bytes) {
-							Ok(s) => s,
-							Err(e) => return Err(DecodeError::InvalidUtf8(e)),
-						};
-						(StreamEvent::TextString(body), len + 5)
-					}
-					0x7B => {
-						bounds_check!(9);
-						let len = read_be_u64(&input[1..]) as _;
-						bounds_check!(len + 9);
-						let body_bytes = *(&input[9..].split_at(len).0);
-						let body = match str_from_utf8(body_bytes) {
-							Ok(s) => s,
-							Err(e) => return Err(DecodeError::InvalidUtf8(e)),
-						};
-						(StreamEvent::TextString(body), len + 9)
-					}
-					n if n <= 0x5E => return Err(DecodeError::Malformed),
-					0x7F => {
-						self.pending_breaks += 1;
-						(StreamEvent::TextStringStart, 1)
-					}
-					0xFF => match self.pending_breaks {
-						0 => return Err(DecodeError::Malformed),
-						_ => {
-							self.pending_breaks -= 1;
-							(StreamEvent::Break, 1)
+				macro_rules! read_argument {
+					() => {
+						match additional {
+							n if n < 24 => (Some(n as u64), 1),
+							24 => {
+								bounds_check!(1);
+								(Some(excess[0] as _), 2)
+							}
+							25 => {
+								bounds_check!(2);
+								(Some(read_be_u16(excess) as _), 3)
+							}
+							26 => {
+								bounds_check!(4);
+								(Some(read_be_u32(excess) as _), 5)
+							}
+							27 => {
+								bounds_check!(8);
+								(Some(read_be_u64(excess) as _), 9)
+							}
+							28 | 29 | 30 => return Err(DecodeError::Malformed),
+							31 => (None, 0),
+							_ => unreachable!(),
 						}
+					};
+				}
+
+				match major {
+					0 => {
+						let (val, offset) = read_argument!();
+						(
+							StreamEvent::Unsigned(match val {
+								Some(x) => x,
+								None => return Err(DecodeError::Malformed),
+							}),
+							offset,
+						)
+					}
+					1 => {
+						let (val, offset) = read_argument!();
+						(
+							StreamEvent::Signed(match val {
+								Some(x) => x,
+								None => return Err(DecodeError::Malformed),
+							}),
+							offset,
+						)
+					}
+					2 => {
+						let (val, offset) = read_argument!();
+						match val {
+							Some(len) => {
+								let len = len as usize;
+								// remember that offset includes the initial
+								bounds_check!(len + offset - 1);
+								(
+									StreamEvent::ByteString(&excess[offset - 1..len + offset - 1]),
+									len + offset,
+								)
+							}
+							None => {
+								self.pending_breaks += 1;
+								(StreamEvent::ByteStringStart, 1)
+							}
+						}
+					}
+					3 => {
+						let (val, offset) = read_argument!();
+						match val {
+							Some(len) => {
+								let len = len as usize;
+								// remember that offset includes the initial
+								bounds_check!(len + offset - 1);
+								(
+									StreamEvent::TextString(str_from_utf8(
+										&excess[offset - 1..len + offset - 1],
+									)?),
+									len + offset,
+								)
+							}
+							None => {
+								self.pending_breaks += 1;
+								(StreamEvent::TextStringStart, 1)
+							}
+						}
+					}
+					4..=6 => todo!(),
+					7 => match additional {
+						0..=27 => todo!(),
+						28..=30 => return Err(DecodeError::Malformed),
+						31 => (StreamEvent::Break, 1),
+						31..=u8::MAX => unreachable!(),
 					},
-					_ => todo!(),
+					8..=u8::MAX => unreachable!(),
 				}
 			};
 			input.1 = size;
@@ -320,7 +266,7 @@ mod test {
 		(match $decoder:ident: $in:expr => $out:pat if $cond:expr) => {
 			match $decoder.next_event() {
 				Ok($out) if $cond => (),
-				other => panic!("{:?} -> {:?}", $in, other),
+				other => panic!(concat!("{:X?} -> {:X?} instead of ", stringify!($out), " if ", stringify!($cond)), $in, other),
 			}
 		};
 		(match $decoder:ident: $in:expr => $out:pat) => {
@@ -329,7 +275,7 @@ mod test {
 		(match $decoder:ident: $out:pat if $cond:expr) => {
 			match $decoder.next_event() {
 				Ok($out) if $cond => (),
-				other => panic!("? -> {:?}", other),
+				other => panic!("? -> {:X?}", other),
 			}
 		};
 		(match $decoder:ident: $out:pat) => {

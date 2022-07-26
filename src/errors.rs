@@ -11,5 +11,5 @@ pub enum DecodeError {
 	#[error("incomplete or excess data")]
 	IncompleteOrExcess,
 	#[error("invalid UTF-8: {0}")]
-	InvalidUtf8(Utf8Error),
+	InvalidUtf8(#[from] Utf8Error),
 }
