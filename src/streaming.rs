@@ -50,6 +50,14 @@ impl StreamDecoder {
 		input.0.len()
 	}
 
+	/// Feed some data into the decoder.
+	///
+	/// The data provided will not be parsed until [`next_event`] is called.
+	/// The return value is the total number of bytes in the internal buffer.
+	pub fn feed_ref<'a>(&mut self, data: impl Iterator<Item = &'a u8>) -> usize {
+		self.feed(data.map(|x| *x))
+	}
+
 	/// Pull an event from the decoder.
 	pub fn next_event(&mut self) -> Result<Option<StreamEvent>, DecodeError> {
 		let input = self.input_buffer.get_mut();
@@ -303,7 +311,7 @@ mod test {
 		};
 		(ref $in:expr => $out:pat if $cond:expr) => {
 			let mut decoder = StreamDecoder::new();
-			decoder.feed($in.into_iter().map(|x| *x));
+			decoder.feed_ref($in.into_iter());
 			decode_test!(match decoder: $in => Some($out) if $cond);
 			decoder.finish(false).unwrap();
 		};
@@ -407,7 +415,7 @@ mod test {
 	#[test]
 	fn decode_bytes_segmented() {
 		let mut decoder = StreamDecoder::new();
-		decoder.feed(b"\x5F\x44abcd\x43efg\xFF".into_iter().map(|x| *x));
+		decoder.feed_ref(b"\x5F\x44abcd\x43efg\xFF".into_iter());
 		decode_test!(match decoder: Some(StreamEvent::UnknownLengthByteStringStart));
 		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Some(StreamEvent::ByteString(b"abcd")));
@@ -421,7 +429,7 @@ mod test {
 	#[test]
 	fn decode_bytes_segmented_small() {
 		let mut decoder = StreamDecoder::new();
-		decoder.feed(b"\x5F\x44abcd".into_iter().map(|x| *x));
+		decoder.feed_ref(b"\x5F\x44abcd".into_iter());
 		decode_test!(match decoder: Some(StreamEvent::UnknownLengthByteStringStart));
 		decode_test!(match decoder: Some(StreamEvent::ByteString(b"abcd")));
 		decode_test!(match decoder: None);
@@ -447,7 +455,7 @@ mod test {
 	#[test]
 	fn decode_text_segmented() {
 		let mut decoder = StreamDecoder::new();
-		decoder.feed(b"\x7F\x64abcd\x63efg\xFF".into_iter().map(|x| *x));
+		decoder.feed_ref(b"\x7F\x64abcd\x63efg\xFF".into_iter());
 		decode_test!(match decoder: Some(StreamEvent::UnknownLengthTextStringStart));
 		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Some(StreamEvent::TextString("abcd")));
@@ -461,7 +469,7 @@ mod test {
 	#[test]
 	fn decode_text_segmented_small() {
 		let mut decoder = StreamDecoder::new();
-		decoder.feed(b"\x7F\x64abcd".into_iter().map(|x| *x));
+		decoder.feed_ref(b"\x7F\x64abcd".into_iter());
 		decode_test!(match decoder: Some(StreamEvent::UnknownLengthTextStringStart));
 		decode_test!(match decoder: Some(StreamEvent::TextString("abcd")));
 		decode_test!(match decoder: None);
