@@ -166,7 +166,7 @@ impl StreamDecoder {
 							}
 							None => {
 								self.pending.push(Pending::Break);
-								(StreamEvent::UnknownLengthByteStringStart, 1)
+								(StreamEvent::UnknownLengthByteString, 1)
 							}
 						}
 					}
@@ -186,7 +186,7 @@ impl StreamDecoder {
 							}
 							None => {
 								self.pending.push(Pending::Break);
-								(StreamEvent::UnknownLengthTextStringStart, 1)
+								(StreamEvent::UnknownLengthTextString, 1)
 							}
 						}
 					}
@@ -201,7 +201,7 @@ impl StreamDecoder {
 							}
 							None => {
 								self.pending.push(Pending::Break);
-								(StreamEvent::UnknownLengthArrayStart, 1)
+								(StreamEvent::UnknownLengthArray, 1)
 							}
 						}
 					}
@@ -270,21 +270,21 @@ pub enum StreamEvent<'a> {
 	///
 	/// After this event come a series of `ByteString` events, followed by a `Break`.
 	/// To get the true value of the byte string, concatenate the `ByteString` events together.
-	UnknownLengthByteStringStart,
+	UnknownLengthByteString,
 	/// A text string.
 	TextString(&'a str),
 	/// The start of a text string whose length is unknown.
 	///
 	/// After this event come a series of `TextString` events, followed by a `Break`.
 	/// To get the true value of the text string, concatenate the `TextString` events together.
-	UnknownLengthTextStringStart,
+	UnknownLengthTextString,
 	/// The start of an array with a known length.
 	Array(u64),
 	/// The start of an array whose length is unknown.
 	///
 	/// After this event come a series of events representing the items in the array.
 	/// The array ends at the matching `Break` event.
-	UnknownLengthArrayStart,
+	UnknownLengthArray,
 	/// The end of an unknown-length item.
 	Break,
 }
@@ -461,7 +461,7 @@ mod test {
 	fn decode_bytes_segmented() {
 		let mut decoder = StreamDecoder::new();
 		decoder.feed_ref(b"\x5F\x44abcd\x43efg\xFF".into_iter());
-		decode_test!(match decoder: Some(StreamEvent::UnknownLengthByteStringStart));
+		decode_test!(match decoder: Some(StreamEvent::UnknownLengthByteString));
 		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Some(StreamEvent::ByteString(b"abcd")));
 		assert!(!decoder.ready_to_finish());
@@ -475,7 +475,7 @@ mod test {
 	fn decode_bytes_segmented_small() {
 		let mut decoder = StreamDecoder::new();
 		decoder.feed_ref(b"\x5F\x44abcd".into_iter());
-		decode_test!(match decoder: Some(StreamEvent::UnknownLengthByteStringStart));
+		decode_test!(match decoder: Some(StreamEvent::UnknownLengthByteString));
 		decode_test!(match decoder: Some(StreamEvent::ByteString(b"abcd")));
 		decode_test!(match decoder: None);
 		assert!(!decoder.ready_to_finish());
@@ -501,7 +501,7 @@ mod test {
 	fn decode_text_segmented() {
 		let mut decoder = StreamDecoder::new();
 		decoder.feed_ref(b"\x7F\x64abcd\x63efg\xFF".into_iter());
-		decode_test!(match decoder: Some(StreamEvent::UnknownLengthTextStringStart));
+		decode_test!(match decoder: Some(StreamEvent::UnknownLengthTextString));
 		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Some(StreamEvent::TextString("abcd")));
 		assert!(!decoder.ready_to_finish());
@@ -515,7 +515,7 @@ mod test {
 	fn decode_text_segmented_small() {
 		let mut decoder = StreamDecoder::new();
 		decoder.feed_ref(b"\x7F\x64abcd".into_iter());
-		decode_test!(match decoder: Some(StreamEvent::UnknownLengthTextStringStart));
+		decode_test!(match decoder: Some(StreamEvent::UnknownLengthTextString));
 		decode_test!(match decoder: Some(StreamEvent::TextString("abcd")));
 		decode_test!(match decoder: None);
 		assert!(!decoder.ready_to_finish());
@@ -556,7 +556,7 @@ mod test {
 	fn decode_array_segmented() {
 		let mut decoder = StreamDecoder::new();
 		decoder.feed_slice(b"\x9F\x00\x00\x00\xFF");
-		decode_test!(match decoder: Some(StreamEvent::UnknownLengthArrayStart));
+		decode_test!(match decoder: Some(StreamEvent::UnknownLengthArray));
 		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Some(_));
 		assert!(!decoder.ready_to_finish());
