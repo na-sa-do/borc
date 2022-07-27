@@ -372,48 +372,13 @@ mod test {
 	}
 
 	#[test]
-	fn decode_negint_tiny() {
+	fn decode_negint() {
 		decode_test!([0x20u8] => StreamEvent::Signed(0));
 		decode_test!([0x37u8] => StreamEvent::Signed(0x17));
-	}
-
-	#[test]
-	fn decode_negint_8bit() {
 		decode_test!([0x38, 0x01] => StreamEvent::Signed(0x01));
-	}
-
-	#[test]
-	fn decode_negint_8bit_bounds() {
-		decode_test!(small ref b"\x38");
-	}
-
-	#[test]
-	fn decode_negint_16bit() {
 		decode_test!([0x39, 0x01, 0x02] => StreamEvent::Signed(0x0102));
-	}
-
-	#[test]
-	fn decode_negint_16bit_bounds() {
-		decode_test!(small ref b"\x39\x00");
-	}
-
-	#[test]
-	fn decode_negint_32bit() {
 		decode_test!([0x3A, 0x01, 0x02, 0x03, 0x04] => StreamEvent::Signed(0x01020304));
-	}
-
-	#[test]
-	fn decode_negint_32bit_bounds() {
-		decode_test!(small ref b"\x3A\x00\x00\x00");
-	}
-
-	#[test]
-	fn decode_negint_64bit() {
 		decode_test!([0x3B, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08] => StreamEvent::Signed(0x0102030405060708));
-	}
-
-	#[test]
-	fn decode_negint_64bit_bounds() {
 		decode_test!(small ref b"\x3B\x00\x00\x00\x00\x00\x00\x00");
 	}
 
@@ -430,53 +395,13 @@ mod test {
 	}
 
 	#[test]
-	fn decode_bytes_tiny() {
-		decode_test!([0x40] => StreamEvent::ByteString(bytes) if bytes.len() == 0);
-		decode_test!(ref b"\x45Hello" => StreamEvent::ByteString(bytes) if bytes == b"Hello");
-	}
-
-	#[test]
-	fn decode_bytes_8bit() {
-		decode_test!(ref b"\x58\x04Halo" => StreamEvent::ByteString(bytes) if bytes == b"Halo");
-	}
-
-	#[test]
-	fn decode_bytes_8bit_bounds() {
-		decode_test!(small ref b"\x58");
-		decode_test!(small ref b"\x58\x01");
-	}
-
-	#[test]
-	fn decode_bytes_16bit() {
-		decode_test!(ref b"\x59\x00\x07Goodbye" => StreamEvent::ByteString(bytes) if bytes == b"Goodbye");
-	}
-
-	#[test]
-	fn decode_bytes_16bit_bounds() {
-		decode_test!(small ref b"\x59\x00");
-		decode_test!(small ref b"\x59\x00\x01");
-	}
-
-	#[test]
-	fn decode_bytes_32bit() {
-		decode_test!(ref b"\x5A\x00\x00\x00\x0DLong message!" => StreamEvent::ByteString(bytes) if bytes == b"Long message!");
-	}
-
-	#[test]
-	fn decode_bytes_32bit_bounds() {
-		decode_test!(small ref b"\x5A\x00\x00\x00");
-		decode_test!(small ref b"\x5A\x00\x00\x00\x01");
-	}
-
-	#[test]
-	fn decode_bytes_64bit() {
-		decode_test!(ref b"\x5B\x00\x00\x00\x00\x00\x00\x00\x01?" => StreamEvent::ByteString(bytes) if bytes == b"?");
-	}
-
-	#[test]
-	fn decode_bytes_64bit_bounds() {
-		decode_test!(small ref b"\x5B\x00\x00\x00\x00\x00\x00\x00");
-		decode_test!(small ref b"\x5B\x00\x00\x00\x00\x00\x00\x00\x01");
+	fn decode_bytes() {
+		decode_test!([0x40] => StreamEvent::ByteString(b""));
+		decode_test!(ref b"\x45Hello" => StreamEvent::ByteString(b"Hello"));
+		decode_test!(ref b"\x58\x04Halo" => StreamEvent::ByteString(b"Halo"));
+		decode_test!(ref b"\x59\x00\x07Goodbye" => StreamEvent::ByteString(b"Goodbye"));
+		decode_test!(ref b"\x5A\x00\x00\x00\x0DLong message!" => StreamEvent::ByteString(b"Long message!"));
+		decode_test!(ref b"\x5B\x00\x00\x00\x00\x00\x00\x00\x01?" => StreamEvent::ByteString(b"?"));
 	}
 
 	#[test]
@@ -504,47 +429,13 @@ mod test {
 	}
 
 	#[test]
-	fn decode_text_tiny() {
-		decode_test!([0x60] => StreamEvent::TextString(text) if text.len() == 0);
-		decode_test!(ref b"\x65Hello" => StreamEvent::TextString(text) if text == "Hello");
-	}
-
-	#[test]
-	fn decode_text_8bit() {
-		decode_test!(ref b"\x78\x04Halo" => StreamEvent::TextString(text) if text == "Halo");
-	}
-
-	#[test]
-	fn decode_text_8bit_bounds() {
-		decode_test!(small ref b"\x78");
-		decode_test!(small ref b"\x78\x01");
-	}
-
-	#[test]
-	fn decode_text_16bit() {
-		decode_test!(ref b"\x79\x00\x07Goodbye" => StreamEvent::TextString(text) if text == "Goodbye");
-	}
-
-	#[test]
-	fn decode_text_16bit_bounds() {
-		decode_test!(small ref b"\x79\x00");
-		decode_test!(small ref b"\x79\x00\x01");
-	}
-
-	#[test]
-	fn decode_text_32bit() {
-		decode_test!(ref b"\x7A\x00\x00\x00\x0DLong message!" => StreamEvent::TextString(text) if text == "Long message!");
-	}
-
-	#[test]
-	fn decode_text_32bit_bounds() {
-		decode_test!(small ref b"\x7A\x00\x00\x00");
-		decode_test!(small ref b"\x7A\x00\x00\x00\x01");
-	}
-
-	#[test]
-	fn decode_text_64bit() {
-		decode_test!(ref b"\x7B\x00\x00\x00\x00\x00\x00\x00\x01?" => StreamEvent::TextString(text) if text == "?");
+	fn decode_text() {
+		decode_test!([0x60] => StreamEvent::TextString(""));
+		decode_test!(ref b"\x65Hello" => StreamEvent::TextString("Hello"));
+		decode_test!(ref b"\x78\x04Halo" => StreamEvent::TextString("Halo"));
+		decode_test!(ref b"\x79\x00\x07Goodbye" => StreamEvent::TextString("Goodbye"));
+		decode_test!(ref b"\x7A\x00\x00\x00\x0DLong message!" => StreamEvent::TextString("Long message!"));
+		decode_test!(ref b"\x7B\x00\x00\x00\x00\x00\x00\x00\x01?" => StreamEvent::TextString("?"));
 	}
 
 	#[test]
