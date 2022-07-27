@@ -58,6 +58,14 @@ impl StreamDecoder {
 		self.feed(data.map(|x| *x))
 	}
 
+	/// Feed some data into the decoder.
+	///
+	/// The data provided will not be parsed until [`next_event`] is called.
+	/// The return value is the total number of bytes in the internal buffer.
+	pub fn feed_slice(&mut self, data: &[u8]) -> usize {
+		self.feed_ref(data.into_iter())
+	}
+
 	/// Pull an event from the decoder.
 	pub fn next_event(&mut self) -> Result<Option<StreamEvent>, DecodeError> {
 		let input = self.input_buffer.get_mut();
@@ -474,5 +482,15 @@ mod test {
 		decode_test!(match decoder: Some(StreamEvent::TextString("abcd")));
 		decode_test!(match decoder: None);
 		assert!(!decoder.ready_to_finish());
+	}
+
+	#[test]
+	fn decode_text_invalid() {
+		let mut decoder = StreamDecoder::new();
+		decoder.feed_ref(b"\x62\xFF\xFF".into_iter());
+		match decoder.next_event() {
+			Err(DecodeError::InvalidUtf8(_)) => (),
+			_ => panic!("accepted invalid UTF-8"),
+		}
 	}
 }
