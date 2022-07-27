@@ -30,6 +30,7 @@ pub struct StreamDecoder {
 #[derive(Debug, Clone)]
 enum Pending {
 	Break,
+	Array(u64),
 }
 
 impl StreamDecoder {
@@ -116,6 +117,20 @@ impl StreamDecoder {
 					};
 				}
 
+				let mut pop_pending = false;
+				match self.pending.last_mut() {
+					Some(Pending::Array(ref mut n)) => {
+						*n -= 1;
+						if *n == 0 {
+							pop_pending = true;
+						}
+					}
+					Some(Pending::Break) | None => (),
+				}
+				if pop_pending {
+					self.pending.pop();
+				}
+
 				match major {
 					0 => {
 						let (val, offset) = read_argument!();
@@ -175,7 +190,22 @@ impl StreamDecoder {
 							}
 						}
 					}
-					4..=6 => todo!(),
+					4 => {
+						let (val, offset) = read_argument!();
+						match val {
+							Some(len) => {
+								if len > 0 {
+									self.pending.push(Pending::Array(len));
+								}
+								(StreamEvent::Array(len), offset)
+							}
+							None => {
+								self.pending.push(Pending::Break);
+								(StreamEvent::UnknownLengthArrayStart, 1)
+							}
+						}
+					}
+					5 | 6 => todo!(),
 					7 => match additional {
 						0..=27 => todo!(),
 						28..=30 => return Err(DecodeError::Malformed),
@@ -248,6 +278,13 @@ pub enum StreamEvent<'a> {
 	/// After this event come a series of `TextString` events, followed by a `Break`.
 	/// To get the true value of the text string, concatenate the `TextString` events together.
 	UnknownLengthTextStringStart,
+	/// The start of an array with a known length.
+	Array(u64),
+	/// The start of an array whose length is unknown.
+	///
+	/// After this event come a series of events representing the items in the array.
+	/// The array ends at the matching `Break` event.
+	UnknownLengthArrayStart,
 	/// The end of an unknown-length item.
 	Break,
 }
@@ -492,5 +529,42 @@ mod test {
 			Err(DecodeError::InvalidUtf8(_)) => (),
 			_ => panic!("accepted invalid UTF-8"),
 		}
+	}
+
+	#[test]
+	fn decode_array() {
+		let mut decoder = StreamDecoder::new();
+		decoder.feed_slice(b"\x84\0\x01\x02\x03");
+		decode_test!(match decoder: Some(StreamEvent::Array(4)));
+		assert!(!decoder.ready_to_finish());
+		decode_test!(match decoder: Some(_));
+		assert!(!decoder.ready_to_finish());
+		decode_test!(match decoder: Some(_));
+		assert!(!decoder.ready_to_finish());
+		decode_test!(match decoder: Some(_));
+		assert!(!decoder.ready_to_finish());
+		decode_test!(match decoder: Some(_));
+		assert!(decoder.ready_to_finish());
+
+		let mut decoder = StreamDecoder::new();
+		decoder.feed_slice(b"\x80");
+		decode_test!(match decoder: Some(StreamEvent::Array(0)));
+		assert!(decoder.ready_to_finish());
+	}
+
+	#[test]
+	fn decode_array_segmented() {
+		let mut decoder = StreamDecoder::new();
+		decoder.feed_slice(b"\x9F\x00\x00\x00\xFF");
+		decode_test!(match decoder: Some(StreamEvent::UnknownLengthArrayStart));
+		assert!(!decoder.ready_to_finish());
+		decode_test!(match decoder: Some(_));
+		assert!(!decoder.ready_to_finish());
+		decode_test!(match decoder: Some(_));
+		assert!(!decoder.ready_to_finish());
+		decode_test!(match decoder: Some(_));
+		assert!(!decoder.ready_to_finish());
+		decode_test!(match decoder: Some(StreamEvent::Break));
+		assert!(decoder.ready_to_finish());
 	}
 }
