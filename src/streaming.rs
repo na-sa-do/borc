@@ -259,7 +259,19 @@ impl StreamDecoder {
 								n => (StreamEvent::Simple(n), 2),
 							}
 						}
-						25..=27 => todo!(),
+						25 => todo!(),
+						26 => {
+							bounds_check!(4);
+							let mut bytes = [0u8; 4];
+							bytes.copy_from_slice(&excess[..4]);
+							(StreamEvent::Float(f32::from_be_bytes(bytes).into()), 5)
+						}
+						27 => {
+							bounds_check!(8);
+							let mut bytes = [0u8; 8];
+							bytes.copy_from_slice(&excess[..8]);
+							(StreamEvent::Float(f64::from_be_bytes(bytes)), 9)
+						}
 						28..=30 => return Err(DecodeError::Malformed),
 						31 => {
 							match self.pending.pop() {
@@ -353,6 +365,8 @@ pub enum StreamEvent<'a> {
 	///
 	/// Most notably, simple values 20, 21, 22, and 23 represent false, true, null, and undefined, respectively.
 	Simple(u8),
+	/// A floating-point number.
+	Float(f64),
 	/// The end of an unknown-length item.
 	Break,
 }
@@ -706,5 +720,15 @@ mod test {
 		for n in 24..=255 {
 			decode_test!([0xF8, n] => StreamEvent::Simple(x) if x == n);
 		}
+	}
+
+	#[test]
+	fn decode_float_64bit() {
+		decode_test!(ref b"\xFB\x7F\xF0\x00\x00\x00\x00\x00\x00" => StreamEvent::Float(n) if n == f64::INFINITY);
+	}
+
+	#[test]
+	fn decode_float_32bit() {
+		decode_test!(ref b"\xFA\x3F\x80\x00\x00" => StreamEvent::Float(n) if n == 1.0);
 	}
 }
