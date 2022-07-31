@@ -5,15 +5,21 @@ use std::str::from_utf8 as str_from_utf8;
 use crate::DecodeError;
 
 fn read_be_u16(input: &[u8]) -> u16 {
-	u16::from_be_bytes(input.split_at(2).0.try_into().unwrap())
+	let mut bytes = [0u8; 2];
+	bytes.copy_from_slice(&input[..2]);
+	u16::from_be_bytes(bytes)
 }
 
 fn read_be_u32(input: &[u8]) -> u32 {
-	u32::from_be_bytes(input.split_at(4).0.try_into().unwrap())
+	let mut bytes = [0u8; 4];
+	bytes.copy_from_slice(&input[..4]);
+	u32::from_be_bytes(bytes)
 }
 
 fn read_be_u64(input: &[u8]) -> u64 {
-	u64::from_be_bytes(input.split_at(8).0.try_into().unwrap())
+	let mut bytes = [0u8; 8];
+	bytes.copy_from_slice(&input[..8]);
+	u64::from_be_bytes(bytes)
 }
 
 /// A streaming CBOR decoder with minimal logic.
