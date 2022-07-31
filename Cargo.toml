@@ -5,3 +5,7 @@ edition = "2021"
 
 [dependencies]
 thiserror = "1.0.31"
+half = {version = "2.1.0", optional = true}
+
+[features]
+default = ["half"]

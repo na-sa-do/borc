@@ -259,7 +259,20 @@ impl StreamDecoder {
 								n => (StreamEvent::Simple(n), 2),
 							}
 						}
-						25 => todo!(),
+						#[cfg(not(feature = "half"))]
+						25 => {
+							return Err(DecodeError::NoHalfFloatSupport);
+						}
+						#[cfg(feature = "half")]
+						25 => {
+							bounds_check!(2);
+							let mut bytes = [0u8; 2];
+							bytes.copy_from_slice(&excess[..2]);
+							(
+								StreamEvent::Float(half::f16::from_be_bytes(bytes).into()),
+								3,
+							)
+						}
 						26 => {
 							bounds_check!(4);
 							let mut bytes = [0u8; 4];
@@ -730,5 +743,22 @@ mod test {
 	#[test]
 	fn decode_float_32bit() {
 		decode_test!(ref b"\xFA\x3F\x80\x00\x00" => StreamEvent::Float(n) if n == 1.0);
+	}
+
+	#[cfg(not(feature = "half"))]
+	#[test]
+	fn decode_float_16bit() {
+		let mut decoder = StreamDecoder::new();
+		decoder.feed_slice(b"\xF9\x00\x00");
+		match decoder.next_event() {
+			Err(DecodeError::NoHalfFloatSupport) => (),
+			x => panic!("got {:?} when decoding a half-float", x),
+		}
+	}
+
+	#[cfg(feature = "half")]
+	#[test]
+	fn decode_float_16bit() {
+		decode_test!(ref b"\xF9\x00\x00" => StreamEvent::Float(n) if n == 0.0);
 	}
 }

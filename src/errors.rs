@@ -12,4 +12,6 @@ pub enum DecodeError {
 	IncompleteOrExcess,
 	#[error("invalid UTF-8: {0}")]
 	InvalidUtf8(#[from] Utf8Error),
+	#[error("implementation does not support half-width floats")]
+	NoHalfFloatSupport,
 }
