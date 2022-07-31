@@ -31,6 +31,8 @@ pub struct StreamDecoder {
 enum Pending {
 	Break,
 	Array(u64),
+	Map(u64, bool),
+	UnknownLengthMap(bool),
 }
 
 impl StreamDecoder {
@@ -125,6 +127,18 @@ impl StreamDecoder {
 							pop_pending = true;
 						}
 					}
+					Some(Pending::Map(ref mut n, ref mut can_stop)) => {
+						*can_stop = !*can_stop;
+						if *can_stop {
+							*n -= 1;
+							if *n == 0 {
+								pop_pending = true;
+							}
+						}
+					}
+					Some(Pending::UnknownLengthMap(ref mut can_stop)) => {
+						*can_stop = !*can_stop;
+					}
 					Some(Pending::Break) | None => (),
 				}
 				if pop_pending {
@@ -205,18 +219,34 @@ impl StreamDecoder {
 							}
 						}
 					}
-					5 | 6 => todo!(),
+					5 => {
+						let (val, offset) = read_argument!();
+						match val {
+							Some(len) => {
+								if len > 0 {
+									self.pending.push(Pending::Map(len, true));
+								}
+								(StreamEvent::Map(len), offset)
+							}
+							None => {
+								self.pending.push(Pending::UnknownLengthMap(true));
+								(StreamEvent::UnknownLengthMap, 1)
+							}
+						}
+					}
+					6 => todo!(),
 					7 => match additional {
 						0..=27 => todo!(),
 						28..=30 => return Err(DecodeError::Malformed),
 						31 => {
 							match self.pending.pop() {
-								Some(Pending::Break) => (),
+								// This is false because it's already been flipped for this item.
+								Some(Pending::Break) | Some(Pending::UnknownLengthMap(false)) => (),
 								_ => return Err(DecodeError::Malformed),
 							}
 							(StreamEvent::Break, 1)
 						}
-						31..=u8::MAX => unreachable!(),
+						32..=u8::MAX => unreachable!(),
 					},
 					8..=u8::MAX => unreachable!(),
 				}
@@ -285,6 +315,13 @@ pub enum StreamEvent<'a> {
 	/// After this event come a series of events representing the items in the array.
 	/// The array ends at the matching `Break` event.
 	UnknownLengthArray,
+	/// The start of a map with a known length.
+	///
+	/// Note that the actual number of sub-items is _twice_ the length given.
+	/// The first in each pair is a key, and the second is the value.
+	Map(u64),
+	/// The start of a map with an unknown length.
+	UnknownLengthMap,
 	/// The end of an unknown-length item.
 	Break,
 }
@@ -566,5 +603,53 @@ mod test {
 		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Some(StreamEvent::Break));
 		assert!(decoder.ready_to_finish());
+	}
+
+	#[test]
+	fn decode_map() {
+		let mut decoder = StreamDecoder::new();
+		decoder.feed_slice(b"\xA2\x01\x02\x03\x04");
+		decode_test!(match decoder: Some(StreamEvent::Map(2)));
+		assert!(!decoder.ready_to_finish());
+		decode_test!(match decoder: Some(_));
+		assert!(!decoder.ready_to_finish());
+		decode_test!(match decoder: Some(_));
+		assert!(!decoder.ready_to_finish());
+		decode_test!(match decoder: Some(_));
+		assert!(!decoder.ready_to_finish());
+		decode_test!(match decoder: Some(_));
+		assert!(decoder.ready_to_finish());
+
+		let mut decoder = StreamDecoder::new();
+		decoder.feed_slice(b"\xA0");
+		decode_test!(match decoder: Some(StreamEvent::Map(0)));
+		assert!(decoder.ready_to_finish());
+	}
+
+	#[test]
+	fn decode_map_segmented() {
+		let mut decoder = StreamDecoder::new();
+		decoder.feed_slice(b"\xBF\x00\x00\x00\x00\xFF");
+		decode_test!(match decoder: Some(StreamEvent::UnknownLengthMap));
+		assert!(!decoder.ready_to_finish());
+		decode_test!(match decoder: Some(_));
+		assert!(!decoder.ready_to_finish());
+		decode_test!(match decoder: Some(_));
+		assert!(!decoder.ready_to_finish());
+		decode_test!(match decoder: Some(_));
+		assert!(!decoder.ready_to_finish());
+		decode_test!(match decoder: Some(_));
+		assert!(!decoder.ready_to_finish());
+		decode_test!(match decoder: Some(StreamEvent::Break));
+		assert!(decoder.ready_to_finish());
+	}
+
+	#[test]
+	fn decode_map_segmented_odd() {
+		let mut decoder = StreamDecoder::new();
+		decoder.feed_slice(b"\xBF\x00\xFF");
+		decode_test!(match decoder: Some(StreamEvent::UnknownLengthMap));
+		decode_test!(match decoder: Some(_));
+		assert!(!decoder.ready_to_finish());
 	}
 }
