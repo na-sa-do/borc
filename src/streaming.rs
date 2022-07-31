@@ -251,7 +251,15 @@ impl StreamDecoder {
 						}
 					}
 					7 => match additional {
-						0..=27 => todo!(),
+						n @ 0..=23 => (StreamEvent::Simple(n), 1),
+						24 => {
+							bounds_check!(1);
+							match excess[0] {
+								0..=23 => return Err(DecodeError::Malformed),
+								n => (StreamEvent::Simple(n), 2),
+							}
+						}
+						25..=27 => todo!(),
 						28..=30 => return Err(DecodeError::Malformed),
 						31 => {
 							match self.pending.pop() {
@@ -272,7 +280,7 @@ impl StreamDecoder {
 	}
 
 	/// Check whether it is possible to end the decoding now.
-	/// 
+	///
 	/// This will report that it is not possible to end the decoding if there is excess data and the `ignore_excess` parameter is false.
 	pub fn ready_to_finish(&self, ignore_excess: bool) -> bool {
 		let mut input = self.input_buffer.borrow_mut();
@@ -341,6 +349,10 @@ pub enum StreamEvent<'a> {
 	UnknownLengthMap,
 	/// Additional type information for the next CBOR item.
 	Tag(u64),
+	/// A CBOR simple value.
+	///
+	/// Most notably, simple values 20, 21, 22, and 23 represent false, true, null, and undefined, respectively.
+	Simple(u8),
 	/// The end of an unknown-length item.
 	Break,
 }
@@ -680,5 +692,19 @@ mod test {
 		assert!(!decoder.ready_to_finish(false));
 		decode_test!(match decoder: Some(_));
 		assert!(decoder.ready_to_finish(false));
+	}
+
+	#[test]
+	fn decode_simple_tiny() {
+		for n in 0..=23 {
+			decode_test!([0xE0 | n] => StreamEvent::Simple(x) if x == n);
+		}
+	}
+
+	#[test]
+	fn decode_simple_8bit() {
+		for n in 24..=255 {
+			decode_test!([0xF8, n] => StreamEvent::Simple(x) if x == n);
+		}
 	}
 }
