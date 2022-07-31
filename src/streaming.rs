@@ -33,6 +33,7 @@ enum Pending {
 	Array(u64),
 	Map(u64, bool),
 	UnknownLengthMap(bool),
+	Tag,
 }
 
 impl StreamDecoder {
@@ -139,6 +140,9 @@ impl StreamDecoder {
 					Some(Pending::UnknownLengthMap(ref mut can_stop)) => {
 						*can_stop = !*can_stop;
 					}
+					Some(Pending::Tag) => {
+						pop_pending = true;
+					}
 					Some(Pending::Break) | None => (),
 				}
 				if pop_pending {
@@ -234,7 +238,18 @@ impl StreamDecoder {
 							}
 						}
 					}
-					6 => todo!(),
+					6 => {
+						let (val, offset) = read_argument!();
+						match val {
+							Some(tag) => {
+								self.pending.push(Pending::Tag);
+								(StreamEvent::Tag(tag), offset)
+							}
+							None => {
+								return Err(DecodeError::Malformed);
+							}
+						}
+					}
 					7 => match additional {
 						0..=27 => todo!(),
 						28..=30 => return Err(DecodeError::Malformed),
@@ -322,6 +337,8 @@ pub enum StreamEvent<'a> {
 	Map(u64),
 	/// The start of a map with an unknown length.
 	UnknownLengthMap,
+	/// Additional type information for the next CBOR item.
+	Tag(u64),
 	/// The end of an unknown-length item.
 	Break,
 }
@@ -651,5 +668,15 @@ mod test {
 		decode_test!(match decoder: Some(StreamEvent::UnknownLengthMap));
 		decode_test!(match decoder: Some(_));
 		assert!(!decoder.ready_to_finish());
+	}
+
+	#[test]
+	fn decode_tag() {
+		let mut decoder = StreamDecoder::new();
+		decoder.feed_slice(b"\xC1\x00");
+		decode_test!(match decoder: Some(StreamEvent::Tag(1)));
+		assert!(!decoder.ready_to_finish());
+		decode_test!(match decoder: Some(_));
+		assert!(decoder.ready_to_finish());
 	}
 }
