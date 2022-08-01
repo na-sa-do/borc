@@ -1,4 +1,4 @@
-use std::string::FromUtf8Error;
+use std::{num::NonZeroUsize, string::FromUtf8Error};
 
 use thiserror::Error;
 
@@ -8,10 +8,14 @@ use thiserror::Error;
 pub enum DecodeError {
 	#[error("malformed CBOR")]
 	Malformed,
-	#[error("incomplete or excess data")]
-	IncompleteOrExcess,
+	#[error("excess data")]
+	Excess,
+	#[error("insufficient data (needed at least {0} more bytes)")]
+	Insufficient(NonZeroUsize),
 	#[error("invalid UTF-8: {0}")]
 	InvalidUtf8(#[from] FromUtf8Error),
 	#[error("implementation does not support half-width floats")]
 	NoHalfFloatSupport,
+	#[error("{0}")]
+	IoError(#[from] std::io::Error),
 }
