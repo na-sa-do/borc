@@ -1,4 +1,4 @@
-use std::str::Utf8Error;
+use std::string::FromUtf8Error;
 
 use thiserror::Error;
 
@@ -11,7 +11,7 @@ pub enum DecodeError {
 	#[error("incomplete or excess data")]
 	IncompleteOrExcess,
 	#[error("invalid UTF-8: {0}")]
-	InvalidUtf8(#[from] Utf8Error),
+	InvalidUtf8(#[from] FromUtf8Error),
 	#[error("implementation does not support half-width floats")]
 	NoHalfFloatSupport,
 }
