@@ -10,7 +10,7 @@ pub enum DecodeError {
 	Malformed,
 	#[error("excess data")]
 	Excess,
-	#[error("insufficient data (needed at least {0} more bytes)")]
+	#[error("insufficient data (needed around {0} more bytes)")]
 	Insufficient(NonZeroUsize),
 	#[error("invalid UTF-8: {0}")]
 	InvalidUtf8(#[from] FromUtf8Error),
