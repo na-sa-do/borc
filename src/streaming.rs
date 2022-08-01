@@ -329,12 +329,12 @@ impl StreamDecoder {
 
 	/// End the decoding.
 	///
-	/// This will report an error if there is excess data and the `ignore_excess` parameter is false.
-	pub fn finish(self, ignore_excess: bool) -> Result<(), DecodeError> {
+	/// This will return the [`StreamDecoder`] if there is excess data and the `ignore_excess` parameter is false.
+	pub fn finish(self, ignore_excess: bool) -> Result<(), Self> {
 		if self.ready_to_finish(ignore_excess) {
 			Ok(())
 		} else {
-			todo!();
+			Err(self)
 		}
 	}
 }
