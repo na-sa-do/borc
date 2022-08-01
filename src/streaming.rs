@@ -71,7 +71,7 @@ impl<T: Read> StreamDecoder<T> {
 						Ok(()) => (),
 						Err(e) => {
 							if e.kind() == std::io::ErrorKind::UnexpectedEof {
-								return Err(DecodeError::Insufficient(n));
+								return Err(DecodeError::Insufficient);
 							} else {
 								return Err(DecodeError::IoError(e));
 							}
@@ -465,7 +465,7 @@ mod test {
 		};
 		(small $in:expr) => {
 			let mut decoder = StreamDecoder::new(Cursor::new($in));
-			decode_test!(match decoder: $in => Err(DecodeError::Insufficient(_)));
+			decode_test!(match decoder: $in => Err(DecodeError::Insufficient));
 			assert!(!decoder.ready_to_finish(false));
 		};
 	}
@@ -568,7 +568,7 @@ mod test {
 		let mut decoder = StreamDecoder::new(Cursor::new(b"\x5F\x44abcd"));
 		decode_test!(match decoder: Ok(StreamEvent::UnknownLengthByteString));
 		decode_test!(match decoder: Ok(StreamEvent::ByteString(x)) if x == b"abcd");
-		decode_test!(match decoder: Err(DecodeError::Insufficient(_)));
+		decode_test!(match decoder: Err(DecodeError::Insufficient));
 		assert!(!decoder.ready_to_finish(false));
 	}
 
@@ -606,7 +606,7 @@ mod test {
 		let mut decoder = StreamDecoder::new(Cursor::new(b"\x7F\x64abcd"));
 		decode_test!(match decoder: Ok(StreamEvent::UnknownLengthTextString));
 		decode_test!(match decoder: Ok(StreamEvent::TextString(x)) if x == "abcd");
-		decode_test!(match decoder: Err(DecodeError::Insufficient(_)));
+		decode_test!(match decoder: Err(DecodeError::Insufficient));
 		assert!(!decoder.ready_to_finish(false));
 	}
 
