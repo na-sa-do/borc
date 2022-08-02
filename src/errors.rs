@@ -14,8 +14,6 @@ pub enum DecodeError {
 	Insufficient,
 	#[error("invalid UTF-8: {0}")]
 	InvalidUtf8(#[from] FromUtf8Error),
-	#[error("implementation does not support half-width floats")]
-	NoHalfFloatSupport,
 	#[error("{0}")]
 	IoError(#[from] std::io::Error),
 }
