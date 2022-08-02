@@ -491,7 +491,9 @@ impl<T: Write> StreamEncoder<T> {
 			StreamEvent::Unsigned(n) => {
 				write_initial_and_argument!(0, n);
 			}
-			StreamEvent::Signed(_) => todo!(),
+			StreamEvent::Signed(n) => {
+				write_initial_and_argument!(1, n);
+			}
 			StreamEvent::ByteString(_) => todo!(),
 			StreamEvent::UnknownLengthByteString => todo!(),
 			StreamEvent::TextString(_) => todo!(),
@@ -644,6 +646,16 @@ mod test {
 		decode_test!([0x3A, 0x01, 0x02, 0x03, 0x04] => Ok(StreamEvent::Signed(0x01020304)));
 		decode_test!([0x3B, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08] => Ok(StreamEvent::Signed(0x0102030405060708)));
 		decode_test!(small b"\x3B\x00\x00\x00\x00\x00\x00\x00");
+	}
+
+	#[test]
+	fn encode_negint() {
+		encode_test!(StreamEvent::Signed(0) => [0x20]);
+		encode_test!(StreamEvent::Signed(0x17) => [0x37]);
+		encode_test!(StreamEvent::Signed(0xAA) => [0x38, 0xAA]);
+		encode_test!(StreamEvent::Signed(0x0102) => [0x39, 0x01, 0x02]);
+		encode_test!(StreamEvent::Signed(0x01020304) => [0x3A, 0x01, 0x02, 0x03, 0x04]);
+		encode_test!(StreamEvent::Signed(0x010203040506) => [0x3B, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
 	}
 
 	#[test]
