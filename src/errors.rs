@@ -17,3 +17,15 @@ pub enum DecodeError {
 	#[error("{0}")]
 	IoError(#[from] std::io::Error),
 }
+
+// Errors that can occur when encoding CBOR.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum EncodeError {
+	#[error("excess data")]
+	Excess,
+	#[error("insufficient data")]
+	Insufficient,
+	#[error("{0}")]
+	IoError(#[from] std::io::Error),
+}

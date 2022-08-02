@@ -1,6 +1,11 @@
-use std::{cell::RefCell, collections::VecDeque, io::Read, num::NonZeroUsize};
+use std::{
+	cell::RefCell,
+	collections::VecDeque,
+	io::{Read, Write},
+	num::NonZeroUsize,
+};
 
-use crate::DecodeError;
+use crate::{DecodeError, EncodeError};
 
 fn read_be_u16(input: &[u8]) -> u16 {
 	let mut bytes = [0u8; 2];
@@ -445,6 +450,66 @@ impl StreamEvent {
 	}
 }
 
+/// A streaming CBOR encoder.
+pub struct StreamEncoder<T: Write> {
+	dest: T,
+}
+
+impl<T: Write> StreamEncoder<T> {
+	pub fn new(dest: T) -> Self {
+		StreamEncoder { dest }
+	}
+
+	pub fn feed_event(&mut self, event: StreamEvent) -> Result<(), EncodeError> {
+		macro_rules! write_initial_and_argument {
+			($major:expr, $argument:expr) => {
+				let major: u8 = $major << 5;
+				match $argument {
+					n if n <= 0x17 => {
+						self.dest.write(&[major | n as u8])?;
+					}
+					n if n <= u8::MAX as _ => {
+						self.dest.write(&[major | 0x18, n as u8])?;
+					}
+					n if n <= u16::MAX as _ => {
+						self.dest.write(&[major | 0x19])?;
+						self.dest.write(&u16::to_be_bytes(n as _))?;
+					}
+					n if n <= u32::MAX as _ => {
+						self.dest.write(&[major | 0x1A])?;
+						self.dest.write(&u32::to_be_bytes(n as _))?;
+					}
+					n => {
+						self.dest.write(&[major | 0x1B])?;
+						self.dest.write(&u64::to_be_bytes(n))?;
+					}
+				}
+			};
+		}
+
+		match event {
+			StreamEvent::Unsigned(n) => {
+				write_initial_and_argument!(0, n);
+			}
+			StreamEvent::Signed(_) => todo!(),
+			StreamEvent::ByteString(_) => todo!(),
+			StreamEvent::UnknownLengthByteString => todo!(),
+			StreamEvent::TextString(_) => todo!(),
+			StreamEvent::UnknownLengthTextString => todo!(),
+			StreamEvent::Array(_) => todo!(),
+			StreamEvent::UnknownLengthArray => todo!(),
+			StreamEvent::Map(_) => todo!(),
+			StreamEvent::UnknownLengthMap => todo!(),
+			StreamEvent::Tag(_) => todo!(),
+			StreamEvent::Float(_) => todo!(),
+			StreamEvent::Simple(_) => todo!(),
+			StreamEvent::Break => todo!(),
+		}
+
+		Ok(())
+	}
+}
+
 #[cfg(test)]
 mod test {
 	use super::*;
@@ -484,10 +549,29 @@ mod test {
 		};
 	}
 
+	macro_rules! encode_test {
+		($($in:expr),+ => $out:expr) => {
+			let mut buf = Vec::new();
+			let mut encoder = StreamEncoder::new(Cursor::new(&mut buf));
+			for event in [$($in),+] {
+				encoder.feed_event(event).unwrap();
+			}
+			std::mem::drop(encoder);
+			assert_eq!(buf, $out);
+		}
+	}
+
 	#[test]
 	fn decode_uint_tiny() {
 		for i1 in 0..=0x17u8 {
 			decode_test!([i1] => Ok(StreamEvent::Unsigned(i2)) if i2 == i1 as _);
+		}
+	}
+
+	#[test]
+	fn encode_uint_tiny() {
+		for i in 0..=0x17u8 {
+			encode_test!(StreamEvent::Unsigned(i as _) => [i]);
 		}
 	}
 
@@ -502,6 +586,11 @@ mod test {
 	}
 
 	#[test]
+	fn encode_uint_8bit() {
+		encode_test!(StreamEvent::Unsigned(0x3F) => [0x18, 0x3F]);
+	}
+
+	#[test]
 	fn decode_uint_16bit() {
 		decode_test!([0x19u8, 0x01, 0x02] => Ok(StreamEvent::Unsigned(0x0102)));
 	}
@@ -509,6 +598,11 @@ mod test {
 	#[test]
 	fn decode_uint_16bit_bounds() {
 		decode_test!(small b"\x19\x00");
+	}
+
+	#[test]
+	fn encode_uint_16bit() {
+		encode_test!(StreamEvent::Unsigned(0x1234) => [0x19, 0x12, 0x34]);
 	}
 
 	#[test]
@@ -522,6 +616,11 @@ mod test {
 	}
 
 	#[test]
+	fn encode_uint_32bit() {
+		encode_test!(StreamEvent::Unsigned(0x12345678) => [0x1A, 0x12, 0x34, 0x56, 0x78]);
+	}
+
+	#[test]
 	fn decode_uint_64bit() {
 		decode_test!([0x1Bu8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08] => Ok(StreamEvent::Unsigned(0x0102030405060708)));
 	}
@@ -529,6 +628,11 @@ mod test {
 	#[test]
 	fn decode_uint_64bit_bounds() {
 		decode_test!(small b"\x1B\x00\x00\x00\x00\x00\x00\x00");
+	}
+
+	#[test]
+	fn encode_uint_64bit() {
+		encode_test!(StreamEvent::Unsigned(0x123456789ABCDEF0) => [0x1B, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0]);
 	}
 
 	#[test]
