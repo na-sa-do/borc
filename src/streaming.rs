@@ -69,10 +69,10 @@ impl<T: Read> StreamDecoder<T> {
 		}
 	}
 
-	fn extend_input_buffer(&mut self, by: NonZeroUsize) -> Result<(), DecodeError> {
+	fn extend_input_buffer(&self, by: NonZeroUsize) -> Result<(), DecodeError> {
 		let mut buf = Vec::with_capacity(by.into());
 		buf.resize(by.into(), 0);
-		match self.source.get_mut().read_exact(&mut buf) {
+		match self.source.borrow_mut().read_exact(&mut buf) {
 			Ok(()) => (),
 			Err(e) => {
 				if e.kind() == std::io::ErrorKind::UnexpectedEof {
@@ -82,7 +82,7 @@ impl<T: Read> StreamDecoder<T> {
 				}
 			}
 		}
-		self.input_buffer.get_mut().extend(buf.into_iter());
+		self.input_buffer.borrow_mut().extend(buf.into_iter());
 		Ok(())
 	}
 
