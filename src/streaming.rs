@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, io::Read, num::NonZeroUsize};
+use std::{cell::RefCell, collections::VecDeque, io::Read, num::NonZeroUsize};
 
 use crate::DecodeError;
 
@@ -26,8 +26,8 @@ fn read_be_u64(input: &[u8]) -> u64 {
 /// It does not enforce higher-level rules, instead aiming to represent the input data as faithfully as possible.
 #[derive(Debug, Clone)]
 pub struct StreamDecoder<T: Read> {
-	source: T,
-	input_buffer: VecDeque<u8>,
+	source: RefCell<T>,
+	input_buffer: RefCell<VecDeque<u8>>,
 	pending: Vec<Pending>,
 }
 
@@ -50,8 +50,8 @@ enum TryNextEventOutcome {
 impl<T: Read> StreamDecoder<T> {
 	pub fn new(source: T) -> Self {
 		StreamDecoder {
-			source,
-			input_buffer: VecDeque::with_capacity(128),
+			source: RefCell::new(source),
+			input_buffer: RefCell::new(VecDeque::with_capacity(128)),
 			pending: Vec::new(),
 		}
 	}
@@ -59,7 +59,7 @@ impl<T: Read> StreamDecoder<T> {
 	/// Pull an event from the decoder.
 	pub fn next_event(&mut self) -> Result<StreamEvent, DecodeError> {
 		use TryNextEventOutcome::*;
-		self.input_buffer.make_contiguous();
+		self.input_buffer.get_mut().make_contiguous();
 		loop {
 			match self.try_next_event() {
 				Event(e) => return Ok(e),
@@ -67,7 +67,7 @@ impl<T: Read> StreamDecoder<T> {
 				Needs(n) => {
 					let mut buf = Vec::with_capacity(n.into());
 					buf.resize(n.into(), 0);
-					match self.source.read_exact(&mut buf) {
+					match self.source.get_mut().read_exact(&mut buf) {
 						Ok(()) => (),
 						Err(e) => {
 							if e.kind() == std::io::ErrorKind::UnexpectedEof {
@@ -77,7 +77,7 @@ impl<T: Read> StreamDecoder<T> {
 							}
 						}
 					}
-					self.input_buffer.extend(buf.into_iter());
+					self.input_buffer.get_mut().extend(buf.into_iter());
 				}
 			}
 		}
@@ -85,12 +85,13 @@ impl<T: Read> StreamDecoder<T> {
 
 	fn try_next_event(&mut self) -> TryNextEventOutcome {
 		use TryNextEventOutcome::*;
-		if self.input_buffer.is_empty() {
+		let input = self.input_buffer.get_mut();
+		if input.is_empty() {
 			Needs(1.try_into().unwrap())
 		} else {
 			let (event, size) = {
 				let input = {
-					let slices = self.input_buffer.as_slices();
+					let slices = input.as_slices();
 					assert_eq!(
 						slices.1.len(),
 						0,
@@ -319,7 +320,7 @@ impl<T: Read> StreamDecoder<T> {
 					8..=u8::MAX => unreachable!(),
 				}
 			};
-			self.input_buffer.drain(0..size);
+			input.drain(0..size);
 			Event(event)
 		}
 	}
@@ -328,7 +329,7 @@ impl<T: Read> StreamDecoder<T> {
 	///
 	/// This will report that it is not possible to end the decoding if there is excess data and the `ignore_excess` parameter is false.
 	pub fn ready_to_finish(&self, ignore_excess: bool) -> bool {
-		if (self.input_buffer.is_empty() || ignore_excess) && self.pending.is_empty() {
+		if (self.input_buffer.borrow().is_empty() || ignore_excess) && self.pending.is_empty() {
 			return true;
 		} else {
 			return false;
