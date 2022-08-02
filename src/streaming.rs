@@ -64,23 +64,26 @@ impl<T: Read> StreamDecoder<T> {
 			match self.try_next_event() {
 				Event(e) => return Ok(e),
 				Error(e) => return Err(e),
-				Needs(n) => {
-					let mut buf = Vec::with_capacity(n.into());
-					buf.resize(n.into(), 0);
-					match self.source.get_mut().read_exact(&mut buf) {
-						Ok(()) => (),
-						Err(e) => {
-							if e.kind() == std::io::ErrorKind::UnexpectedEof {
-								return Err(DecodeError::Insufficient);
-							} else {
-								return Err(DecodeError::IoError(e));
-							}
-						}
-					}
-					self.input_buffer.get_mut().extend(buf.into_iter());
+				Needs(n) => self.extend_input_buffer(n)?,
+			}
+		}
+	}
+
+	fn extend_input_buffer(&mut self, by: NonZeroUsize) -> Result<(), DecodeError> {
+		let mut buf = Vec::with_capacity(by.into());
+		buf.resize(by.into(), 0);
+		match self.source.get_mut().read_exact(&mut buf) {
+			Ok(()) => (),
+			Err(e) => {
+				if e.kind() == std::io::ErrorKind::UnexpectedEof {
+					return Err(DecodeError::Insufficient);
+				} else {
+					return Err(DecodeError::IoError(e));
 				}
 			}
 		}
+		self.input_buffer.get_mut().extend(buf.into_iter());
+		Ok(())
 	}
 
 	fn try_next_event(&mut self) -> TryNextEventOutcome {
