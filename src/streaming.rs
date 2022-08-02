@@ -1,6 +1,4 @@
-use std::cell::RefCell;
-use std::collections::VecDeque;
-use std::str::from_utf8 as str_from_utf8;
+use std::{cell::RefCell, collections::VecDeque, io::Read, num::NonZeroUsize};
 
 use crate::DecodeError;
 
@@ -27,9 +25,9 @@ fn read_be_u64(input: &[u8]) -> u64 {
 /// [`StreamDecoder`] handles input buffering, retrying when new data arrives, and basic parsing.
 /// It does not enforce higher-level rules, instead aiming to represent the input data as faithfully as possible.
 #[derive(Debug, Clone)]
-pub struct StreamDecoder {
-	// the usize is the number of bytes to drain from the buffer before doing anything else
-	input_buffer: RefCell<(VecDeque<u8>, usize)>,
+pub struct StreamDecoder<T: Read> {
+	source: RefCell<T>,
+	input_buffer: RefCell<VecDeque<u8>>,
 	pending: Vec<Pending>,
 }
 
@@ -42,50 +40,68 @@ enum Pending {
 	Tag,
 }
 
-impl StreamDecoder {
-	pub fn new() -> Self {
+#[derive(Debug)]
+enum TryNextEventOutcome {
+	Event(StreamEvent),
+	Error(DecodeError),
+	Needs(NonZeroUsize),
+}
+
+impl<T: Read> StreamDecoder<T> {
+	pub fn new(source: T) -> Self {
 		StreamDecoder {
-			input_buffer: RefCell::new((VecDeque::with_capacity(128), 0)),
+			source: RefCell::new(source),
+			input_buffer: RefCell::new(VecDeque::with_capacity(128)),
 			pending: Vec::new(),
 		}
 	}
 
-	/// Feed some data into the decoder.
-	///
-	/// The data provided will not be parsed until [`next_event`] is called.
-	/// The return value is the total number of bytes in the internal buffer.
-	pub fn feed(&mut self, data: impl Iterator<Item = u8>) -> usize {
-		let input = self.input_buffer.get_mut();
-		input.0.extend(data);
-		input.0.len()
-	}
-
-	/// Feed some data into the decoder.
-	///
-	/// The data provided will not be parsed until [`next_event`] is called.
-	/// The return value is the total number of bytes in the internal buffer.
-	pub fn feed_ref<'a>(&mut self, data: impl Iterator<Item = &'a u8>) -> usize {
-		self.feed(data.map(|x| *x))
-	}
-
-	/// Feed some data into the decoder.
-	///
-	/// The data provided will not be parsed until [`next_event`] is called.
-	/// The return value is the total number of bytes in the internal buffer.
-	pub fn feed_slice(&mut self, data: &[u8]) -> usize {
-		self.feed_ref(data.into_iter())
-	}
-
 	/// Pull an event from the decoder.
-	pub fn next_event(&mut self) -> Result<Option<StreamEvent>, DecodeError> {
+	pub fn next_event(&mut self) -> Result<StreamEvent, DecodeError> {
+		use TryNextEventOutcome::*;
+		self.input_buffer.get_mut().make_contiguous();
+		loop {
+			match self.try_next_event() {
+				Event(e) => return Ok(e),
+				Error(e) => return Err(e),
+				Needs(n) => self.extend_input_buffer(n)?,
+			}
+		}
+	}
+
+	fn extend_input_buffer(&self, by: NonZeroUsize) -> Result<(), DecodeError> {
+		let mut buf = Vec::with_capacity(by.into());
+		buf.resize(by.into(), 0);
+		match self.source.borrow_mut().read_exact(&mut buf) {
+			Ok(()) => (),
+			Err(e) => {
+				if e.kind() == std::io::ErrorKind::UnexpectedEof {
+					return Err(DecodeError::Insufficient);
+				} else {
+					return Err(DecodeError::IoError(e));
+				}
+			}
+		}
+		self.input_buffer.borrow_mut().extend(buf.into_iter());
+		Ok(())
+	}
+
+	fn try_next_event(&mut self) -> TryNextEventOutcome {
+		use TryNextEventOutcome::*;
 		let input = self.input_buffer.get_mut();
-		input.0.drain(0..input.1);
-		input.1 = 0;
-		if input.0.is_empty() {
-			Ok(None)
+		if input.is_empty() {
+			Needs(1.try_into().unwrap())
 		} else {
 			let (event, size) = {
-				let input = input.0.make_contiguous();
+				let input = {
+					let slices = input.as_slices();
+					assert_eq!(
+						slices.1.len(),
+						0,
+						"try_next_event called with non-contiguous buffer"
+					);
+					slices.0
+				};
 				let initial = input[0];
 				let excess = &input[1..];
 				let major = initial >> 5;
@@ -93,8 +109,13 @@ impl StreamDecoder {
 
 				macro_rules! bounds_check {
 					($bound:expr) => {
-						if excess.len() < $bound {
-							return Ok(None);
+						match ($bound as usize)
+							.checked_sub(excess.len())
+							.unwrap_or(0)
+							.try_into()
+						{
+							Ok(n) => return Needs(n),
+							Err(_) => (),
 						}
 					};
 				}
@@ -119,7 +140,7 @@ impl StreamDecoder {
 								bounds_check!(8);
 								(Some(read_be_u64(excess) as _), 9)
 							}
-							28 | 29 | 30 => return Err(DecodeError::Malformed),
+							28 | 29 | 30 => return Error(DecodeError::Malformed),
 							31 => (None, 0),
 							_ => unreachable!(),
 						}
@@ -161,7 +182,7 @@ impl StreamDecoder {
 						(
 							StreamEvent::Unsigned(match val {
 								Some(x) => x,
-								None => return Err(DecodeError::Malformed),
+								None => return Error(DecodeError::Malformed),
 							}),
 							offset,
 						)
@@ -171,7 +192,7 @@ impl StreamDecoder {
 						(
 							StreamEvent::Signed(match val {
 								Some(x) => x,
-								None => return Err(DecodeError::Malformed),
+								None => return Error(DecodeError::Malformed),
 							}),
 							offset,
 						)
@@ -183,10 +204,8 @@ impl StreamDecoder {
 								let len = len as usize;
 								// remember that offset includes the initial
 								bounds_check!(len + offset - 1);
-								(
-									StreamEvent::ByteString(&excess[offset - 1..len + offset - 1]),
-									len + offset,
-								)
+								let contents = excess[offset - 1..len + offset - 1].to_owned();
+								(StreamEvent::ByteString(contents), len + offset)
 							}
 							None => {
 								self.pending.push(Pending::Break);
@@ -201,12 +220,11 @@ impl StreamDecoder {
 								let len = len as usize;
 								// remember that offset includes the initial
 								bounds_check!(len + offset - 1);
-								(
-									StreamEvent::TextString(str_from_utf8(
-										&excess[offset - 1..len + offset - 1],
-									)?),
-									len + offset,
-								)
+								let contents = excess[offset - 1..len + offset - 1].to_owned();
+								match String::from_utf8(contents) {
+									Ok(s) => (StreamEvent::TextString(s), len + offset),
+									Err(e) => return Error(e.into()),
+								}
 							}
 							None => {
 								self.pending.push(Pending::Break);
@@ -252,7 +270,7 @@ impl StreamDecoder {
 								(StreamEvent::Tag(tag), offset)
 							}
 							None => {
-								return Err(DecodeError::Malformed);
+								return Error(DecodeError::Malformed);
 							}
 						}
 					}
@@ -261,15 +279,10 @@ impl StreamDecoder {
 						24 => {
 							bounds_check!(1);
 							match excess[0] {
-								0..=23 => return Err(DecodeError::Malformed),
+								0..=23 => return Error(DecodeError::Malformed),
 								n => (StreamEvent::Simple(n), 2),
 							}
 						}
-						#[cfg(not(feature = "half"))]
-						25 => {
-							return Err(DecodeError::NoHalfFloatSupport);
-						}
-						#[cfg(feature = "half")]
 						25 => {
 							bounds_check!(2);
 							let mut bytes = [0u8; 2];
@@ -291,12 +304,12 @@ impl StreamDecoder {
 							bytes.copy_from_slice(&excess[..8]);
 							(StreamEvent::Float(f64::from_be_bytes(bytes)), 9)
 						}
-						28..=30 => return Err(DecodeError::Malformed),
+						28..=30 => return Error(DecodeError::Malformed),
 						31 => {
 							match self.pending.pop() {
 								// This is false because it's already been flipped for this item.
 								Some(Pending::Break) | Some(Pending::UnknownLengthMap(false)) => (),
-								_ => return Err(DecodeError::Malformed),
+								_ => return Error(DecodeError::Malformed),
 							}
 							(StreamEvent::Break, 1)
 						}
@@ -305,43 +318,52 @@ impl StreamDecoder {
 					8..=u8::MAX => unreachable!(),
 				}
 			};
-			input.1 = size;
-			Ok(Some(event))
+			input.drain(0..size);
+			Event(event)
 		}
 	}
 
 	/// Check whether it is possible to end the decoding now.
 	///
 	/// This will report that it is not possible to end the decoding if there is excess data and the `ignore_excess` parameter is false.
-	pub fn ready_to_finish(&self, ignore_excess: bool) -> bool {
-		let mut input = self.input_buffer.borrow_mut();
-		// for some reason Rust doesn't like this if you get rid of the temporary
-		let to_drain = input.1;
-		input.0.drain(0..to_drain);
-		input.1 = 0;
-
-		if (input.0.is_empty() || ignore_excess) && self.pending.is_empty() {
-			return true;
+	///
+	/// Note that this method needs to read from the buffer in order to determine whether any data remains.
+	/// This is only the case if `ignore_excess` is false.
+	pub fn ready_to_finish(&self, ignore_excess: bool) -> Result<bool, std::io::Error> {
+		if ignore_excess {
+			Ok(self.pending.is_empty())
 		} else {
-			return false;
+			if self.input_buffer.borrow().is_empty() {
+				if let Err(e) = self.extend_input_buffer(1.try_into().unwrap()) {
+					match e {
+						DecodeError::Insufficient => Ok(self.pending.is_empty()),
+						DecodeError::IoError(ioe) => Err(ioe),
+						_ => unreachable!(),
+					}
+				} else {
+					Ok(false)
+				}
+			} else {
+				Ok(false)
+			}
 		}
 	}
 
 	/// End the decoding.
 	///
 	/// This will return the [`StreamDecoder`] if there is excess data and the `ignore_excess` parameter is false.
-	pub fn finish(self, ignore_excess: bool) -> Result<(), Self> {
-		if self.ready_to_finish(ignore_excess) {
-			Ok(())
+	pub fn finish(self, ignore_excess: bool) -> Result<Option<Self>, std::io::Error> {
+		if self.ready_to_finish(ignore_excess)? {
+			Ok(None)
 		} else {
-			Err(self)
+			Ok(Some(self))
 		}
 	}
 }
 
 /// An event encountered while decoding CBOR.
 #[derive(Debug, Clone)]
-pub enum StreamEvent<'a> {
+pub enum StreamEvent {
 	/// An unsigned integer.
 	Unsigned(u64),
 	/// A signed integer in a slightly odd representation.
@@ -351,14 +373,14 @@ pub enum StreamEvent<'a> {
 	/// Use one of the `interpret_signed` associated functions if you don't care about that.
 	Signed(u64),
 	/// A byte string.
-	ByteString(&'a [u8]),
+	ByteString(Vec<u8>),
 	/// The start of a byte string whose length is unknown.
 	///
 	/// After this event come a series of `ByteString` events, followed by a `Break`.
 	/// To get the true value of the byte string, concatenate the `ByteString` events together.
 	UnknownLengthByteString,
 	/// A text string.
-	TextString(&'a str),
+	TextString(String),
 	/// The start of a text string whose length is unknown.
 	///
 	/// After this event come a series of `TextString` events, followed by a `Break`.
@@ -390,7 +412,7 @@ pub enum StreamEvent<'a> {
 	Break,
 }
 
-impl<'a> StreamEvent<'a> {
+impl StreamEvent {
 	/// Interpret a [`StreamEvent::Signed`] value.
 	///
 	/// # Overflow behavior
@@ -426,11 +448,12 @@ impl<'a> StreamEvent<'a> {
 #[cfg(test)]
 mod test {
 	use super::*;
+	use std::io::Cursor;
 
 	macro_rules! decode_test {
 		(match $decoder:ident: $in:expr => $out:pat if $cond:expr) => {
 			match $decoder.next_event() {
-				Ok($out) if $cond => (),
+				$out if $cond => (),
 				other => panic!(concat!("{:X?} -> {:X?} instead of ", stringify!($out), " if ", stringify!($cond)), $in, other),
 			}
 		};
@@ -439,7 +462,7 @@ mod test {
 		};
 		(match $decoder:ident: $out:pat if $cond:expr) => {
 			match $decoder.next_event() {
-				Ok($out) if $cond => (),
+				$out if $cond => (),
 				other => panic!("? -> {:X?}", other),
 			}
 		};
@@ -447,93 +470,76 @@ mod test {
 			decode_test!(match $decoder: $out if true);
 		};
 		($in:expr => $out:pat if $cond:expr) => {
-			let mut decoder = StreamDecoder::new();
-			decoder.feed($in.into_iter());
-			decode_test!(match decoder: $in => Some($out) if $cond);
+			let mut decoder = StreamDecoder::new(Cursor::new($in));
+			decode_test!(match decoder: $in => $out if $cond);
 			decoder.finish(false).unwrap();
 		};
 		($in:expr => $out:pat) => {
 			decode_test!($in => $out if true);
 		};
-		(ref $in:expr => $out:pat if $cond:expr) => {
-			let mut decoder = StreamDecoder::new();
-			decoder.feed_ref($in.into_iter());
-			decode_test!(match decoder: $in => Some($out) if $cond);
-			decoder.finish(false).unwrap();
-		};
-		(ref $in:expr => $out:pat) => {
-			decode_test!(ref $in => $out if true);
-		};
 		(small $in:expr) => {
-			let mut decoder = StreamDecoder::new();
-			decoder.feed($in.into_iter());
-			decode_test!(match decoder: $in => None);
-			assert!(!decoder.ready_to_finish());
-		};
-		(small ref $in:expr) => {
-			let mut decoder = StreamDecoder::new();
-			decoder.feed($in.into_iter().map(|x| *x));
-			decode_test!(match decoder: $in => None);
-			assert!(!decoder.ready_to_finish(false));
+			let mut decoder = StreamDecoder::new(Cursor::new($in));
+			decode_test!(match decoder: $in => Err(DecodeError::Insufficient));
+			assert!(!decoder.ready_to_finish(false).unwrap());
 		};
 	}
 
 	#[test]
 	fn decode_uint_tiny() {
 		for i1 in 0..=0x17u8 {
-			decode_test!([i1] => StreamEvent::Unsigned(i2) if i2 == i1 as _);
+			decode_test!([i1] => Ok(StreamEvent::Unsigned(i2)) if i2 == i1 as _);
 		}
 	}
 
 	#[test]
 	fn decode_uint_8bit() {
-		decode_test!([0x18u8, 0x01] => StreamEvent::Unsigned(0x01));
+		decode_test!([0x18u8, 0x01] => Ok(StreamEvent::Unsigned(0x01)));
 	}
 
 	#[test]
 	fn decode_uint_8bit_bounds() {
-		decode_test!(small ref b"\x18");
+		decode_test!(small b"\x18");
 	}
 
 	#[test]
 	fn decode_uint_16bit() {
-		decode_test!([0x19u8, 0x01, 0x02] => StreamEvent::Unsigned(0x0102));
+		decode_test!([0x19u8, 0x01, 0x02] => Ok(StreamEvent::Unsigned(0x0102)));
 	}
 
 	#[test]
 	fn decode_uint_16bit_bounds() {
-		decode_test!(small ref b"\x19\x00");
+		decode_test!(small b"\x19\x00");
 	}
 
 	#[test]
 	fn decode_uint_32bit() {
-		decode_test!([0x1Au8, 0x01, 0x02, 0x03, 0x04] => StreamEvent::Unsigned(0x01020304));
+		decode_test!([0x1Au8, 0x01, 0x02, 0x03, 0x04] => Ok(StreamEvent::Unsigned(0x01020304)));
 	}
 
 	#[test]
 	fn decode_uint_32bit_bounds() {
-		decode_test!(small ref b"\x1A\x00\x00\x00");
+		decode_test!(small b"\x1A\x00\x00\x00");
 	}
 
 	#[test]
 	fn decode_uint_64bit() {
-		decode_test!([0x1Bu8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08] => StreamEvent::Unsigned(0x0102030405060708));
+		decode_test!([0x1Bu8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08] => Ok(StreamEvent::Unsigned(0x0102030405060708)));
 	}
 
 	#[test]
 	fn decode_uint_64bit_bounds() {
-		decode_test!(small ref b"\x1B\x00\x00\x00\x00\x00\x00\x00");
+		decode_test!(small b"\x1B\x00\x00\x00\x00\x00\x00\x00");
 	}
 
 	#[test]
 	fn decode_negint() {
-		decode_test!([0x20u8] => StreamEvent::Signed(0));
-		decode_test!([0x37u8] => StreamEvent::Signed(0x17));
-		decode_test!([0x38, 0x01] => StreamEvent::Signed(0x01));
-		decode_test!([0x39, 0x01, 0x02] => StreamEvent::Signed(0x0102));
-		decode_test!([0x3A, 0x01, 0x02, 0x03, 0x04] => StreamEvent::Signed(0x01020304));
-		decode_test!([0x3B, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08] => StreamEvent::Signed(0x0102030405060708));
-		decode_test!(small ref b"\x3B\x00\x00\x00\x00\x00\x00\x00");
+		decode_test!([0x20u8] => Ok(StreamEvent::Signed(0)));
+		decode_test!([0x37u8] => Ok(StreamEvent::Signed(0x17)));
+		decode_test!([0x38, 0x01] => Ok(StreamEvent::Signed(0x01)));
+		decode_test!([0x39, 0x01, 0x02] => Ok(StreamEvent::Signed(0x0102)));
+		decode_test!([0x3A, 0x01, 0x02, 0x03, 0x04] => Ok(StreamEvent::Signed(0x01020304)));
+		decode_test!([0x3B, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08] => Ok(StreamEvent::Signed(0x0102030405060708)));
+		decode_test!(small b"\x3B\x00\x00\x00\x00\x00\x00\x00");
 	}
 
 	#[test]
@@ -550,82 +556,77 @@ mod test {
 
 	#[test]
 	fn decode_bytes() {
-		decode_test!([0x40] => StreamEvent::ByteString(b""));
-		decode_test!(ref b"\x45Hello" => StreamEvent::ByteString(b"Hello"));
-		decode_test!(ref b"\x58\x04Halo" => StreamEvent::ByteString(b"Halo"));
-		decode_test!(ref b"\x59\x00\x07Goodbye" => StreamEvent::ByteString(b"Goodbye"));
-		decode_test!(ref b"\x5A\x00\x00\x00\x0DLong message!" => StreamEvent::ByteString(b"Long message!"));
-		decode_test!(ref b"\x5B\x00\x00\x00\x00\x00\x00\x00\x01?" => StreamEvent::ByteString(b"?"));
+		decode_test!([0x40] => Ok(StreamEvent::ByteString(x)) if x == b"");
+		decode_test!(b"\x45Hello" => Ok(StreamEvent::ByteString(x)) if x == b"Hello");
+		decode_test!(b"\x58\x04Halo" => Ok(StreamEvent::ByteString(x)) if x == b"Halo");
+		decode_test!(b"\x59\x00\x07Goodbye" => Ok(StreamEvent::ByteString(x)) if x == b"Goodbye");
+		decode_test!(b"\x5A\x00\x00\x00\x0DLong message!" => Ok(StreamEvent::ByteString(x)) if x == b"Long message!");
+		decode_test!(b"\x5B\x00\x00\x00\x00\x00\x00\x00\x01?" => Ok(StreamEvent::ByteString(x)) if x == b"?");
 	}
 
 	#[test]
 	fn decode_bytes_segmented() {
-		let mut decoder = StreamDecoder::new();
-		decoder.feed_ref(b"\x5F\x44abcd\x43efg\xFF".into_iter());
-		decode_test!(match decoder: Some(StreamEvent::UnknownLengthByteString));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(StreamEvent::ByteString(b"abcd")));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(StreamEvent::ByteString(b"efg")));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(StreamEvent::Break));
-		assert!(decoder.ready_to_finish(false));
+		let mut decoder = StreamDecoder::new(Cursor::new(b"\x5F\x44abcd\x43efg\xFF"));
+		decode_test!(match decoder: Ok(StreamEvent::UnknownLengthByteString));
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(StreamEvent::ByteString(x)) if x == b"abcd");
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(StreamEvent::ByteString(x)) if x == b"efg");
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(StreamEvent::Break));
+		assert!(decoder.ready_to_finish(false).unwrap());
 	}
 
 	#[test]
 	fn decode_bytes_segmented_small() {
-		let mut decoder = StreamDecoder::new();
-		decoder.feed_ref(b"\x5F\x44abcd".into_iter());
-		decode_test!(match decoder: Some(StreamEvent::UnknownLengthByteString));
-		decode_test!(match decoder: Some(StreamEvent::ByteString(b"abcd")));
-		decode_test!(match decoder: None);
-		assert!(!decoder.ready_to_finish(false));
+		let mut decoder = StreamDecoder::new(Cursor::new(b"\x5F\x44abcd"));
+		decode_test!(match decoder: Ok(StreamEvent::UnknownLengthByteString));
+		decode_test!(match decoder: Ok(StreamEvent::ByteString(x)) if x == b"abcd");
+		decode_test!(match decoder: Err(DecodeError::Insufficient));
+		assert!(!decoder.ready_to_finish(false).unwrap());
 	}
 
 	#[test]
 	fn decode_text() {
-		decode_test!([0x60] => StreamEvent::TextString(""));
-		decode_test!(ref b"\x65Hello" => StreamEvent::TextString("Hello"));
-		decode_test!(ref b"\x78\x04Halo" => StreamEvent::TextString("Halo"));
-		decode_test!(ref b"\x79\x00\x07Goodbye" => StreamEvent::TextString("Goodbye"));
-		decode_test!(ref b"\x7A\x00\x00\x00\x0DLong message!" => StreamEvent::TextString("Long message!"));
-		decode_test!(ref b"\x7B\x00\x00\x00\x00\x00\x00\x00\x01?" => StreamEvent::TextString("?"));
+		decode_test!([0x60] => Ok(StreamEvent::TextString(x)) if x == "");
+		decode_test!(b"\x65Hello" => Ok(StreamEvent::TextString(x)) if x == "Hello");
+		decode_test!(b"\x78\x04Halo" => Ok(StreamEvent::TextString(x)) if x == "Halo");
+		decode_test!(b"\x79\x00\x07Goodbye" => Ok(StreamEvent::TextString(x)) if x == "Goodbye");
+		decode_test!(b"\x7A\x00\x00\x00\x0DLong message!" => Ok(StreamEvent::TextString(x)) if x == "Long message!");
+		decode_test!(b"\x7B\x00\x00\x00\x00\x00\x00\x00\x01?" => Ok(StreamEvent::TextString(x)) if x == "?");
 	}
 
 	#[test]
 	fn decode_text_64bit_bounds() {
-		decode_test!(small ref b"\x7B\x00\x00\x00\x00\x00\x00\x00");
-		decode_test!(small ref b"\x7B\x00\x00\x00\x00\x00\x00\x00\x01");
+		decode_test!(small b"\x7B\x00\x00\x00\x00\x00\x00\x00");
+		decode_test!(small b"\x7B\x00\x00\x00\x00\x00\x00\x00\x01");
 	}
 
 	#[test]
 	fn decode_text_segmented() {
-		let mut decoder = StreamDecoder::new();
-		decoder.feed_ref(b"\x7F\x64abcd\x63efg\xFF".into_iter());
-		decode_test!(match decoder: Some(StreamEvent::UnknownLengthTextString));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(StreamEvent::TextString("abcd")));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(StreamEvent::TextString("efg")));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(StreamEvent::Break));
-		assert!(decoder.ready_to_finish(false));
+		let mut decoder = StreamDecoder::new(Cursor::new(b"\x7F\x64abcd\x63efg\xFF"));
+		decode_test!(match decoder: Ok(StreamEvent::UnknownLengthTextString));
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(StreamEvent::TextString(x)) if x == "abcd");
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(StreamEvent::TextString(x)) if x == "efg");
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(StreamEvent::Break));
+		assert!(decoder.ready_to_finish(false).unwrap());
 	}
 
 	#[test]
 	fn decode_text_segmented_small() {
-		let mut decoder = StreamDecoder::new();
-		decoder.feed_ref(b"\x7F\x64abcd".into_iter());
-		decode_test!(match decoder: Some(StreamEvent::UnknownLengthTextString));
-		decode_test!(match decoder: Some(StreamEvent::TextString("abcd")));
-		decode_test!(match decoder: None);
-		assert!(!decoder.ready_to_finish(false));
+		let mut decoder = StreamDecoder::new(Cursor::new(b"\x7F\x64abcd"));
+		decode_test!(match decoder: Ok(StreamEvent::UnknownLengthTextString));
+		decode_test!(match decoder: Ok(StreamEvent::TextString(x)) if x == "abcd");
+		decode_test!(match decoder: Err(DecodeError::Insufficient));
+		assert!(!decoder.ready_to_finish(false).unwrap());
 	}
 
 	#[test]
 	fn decode_text_invalid() {
-		let mut decoder = StreamDecoder::new();
-		decoder.feed_ref(b"\x62\xFF\xFF".into_iter());
+		let mut decoder = StreamDecoder::new(Cursor::new(b"\x62\xFF\xFF"));
 		match decoder.next_event() {
 			Err(DecodeError::InvalidUtf8(_)) => (),
 			_ => panic!("accepted invalid UTF-8"),
@@ -634,137 +635,118 @@ mod test {
 
 	#[test]
 	fn decode_array() {
-		let mut decoder = StreamDecoder::new();
-		decoder.feed_slice(b"\x84\0\x01\x02\x03");
-		decode_test!(match decoder: Some(StreamEvent::Array(4)));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(_));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(_));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(_));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(_));
-		assert!(decoder.ready_to_finish(false));
+		let mut decoder = StreamDecoder::new(Cursor::new(b"\x84\0\x01\x02\x03"));
+		decode_test!(match decoder: Ok(StreamEvent::Array(4)));
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(_));
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(_));
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(_));
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(_));
+		assert!(decoder.ready_to_finish(false).unwrap());
 
-		let mut decoder = StreamDecoder::new();
-		decoder.feed_slice(b"\x80");
-		decode_test!(match decoder: Some(StreamEvent::Array(0)));
-		assert!(decoder.ready_to_finish(false));
+		let mut decoder = StreamDecoder::new(Cursor::new(b"\x80"));
+		decode_test!(match decoder: Ok(StreamEvent::Array(0)));
+		assert!(decoder.ready_to_finish(false).unwrap());
 	}
 
 	#[test]
 	fn decode_array_segmented() {
-		let mut decoder = StreamDecoder::new();
-		decoder.feed_slice(b"\x9F\x00\x00\x00\xFF");
-		decode_test!(match decoder: Some(StreamEvent::UnknownLengthArray));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(_));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(_));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(_));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(StreamEvent::Break));
-		assert!(decoder.ready_to_finish(false));
+		let mut decoder = StreamDecoder::new(Cursor::new(b"\x9F\x00\x00\x00\xFF"));
+		decode_test!(match decoder: Ok(StreamEvent::UnknownLengthArray));
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(_));
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(_));
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(_));
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(StreamEvent::Break));
+		assert!(decoder.ready_to_finish(false).unwrap());
 	}
 
 	#[test]
 	fn decode_map() {
-		let mut decoder = StreamDecoder::new();
-		decoder.feed_slice(b"\xA2\x01\x02\x03\x04");
-		decode_test!(match decoder: Some(StreamEvent::Map(2)));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(_));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(_));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(_));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(_));
-		assert!(decoder.ready_to_finish(false));
+		let mut decoder = StreamDecoder::new(Cursor::new(b"\xA2\x01\x02\x03\x04"));
+		decode_test!(match decoder: Ok(StreamEvent::Map(2)));
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(_));
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(_));
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(_));
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(_));
+		assert!(decoder.ready_to_finish(false).unwrap());
 
-		let mut decoder = StreamDecoder::new();
-		decoder.feed_slice(b"\xA0");
-		decode_test!(match decoder: Some(StreamEvent::Map(0)));
-		assert!(decoder.ready_to_finish(false));
+		let mut decoder = StreamDecoder::new(Cursor::new(b"\xA0"));
+		decode_test!(match decoder: Ok(StreamEvent::Map(0)));
+		assert!(decoder.ready_to_finish(false).unwrap());
 	}
 
 	#[test]
 	fn decode_map_segmented() {
-		let mut decoder = StreamDecoder::new();
-		decoder.feed_slice(b"\xBF\x00\x00\x00\x00\xFF");
-		decode_test!(match decoder: Some(StreamEvent::UnknownLengthMap));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(_));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(_));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(_));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(_));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(StreamEvent::Break));
-		assert!(decoder.ready_to_finish(false));
+		let mut decoder = StreamDecoder::new(Cursor::new(b"\xBF\x00\x00\x00\x00\xFF"));
+		decode_test!(match decoder: Ok(StreamEvent::UnknownLengthMap));
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(_));
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(_));
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(_));
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(_));
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(StreamEvent::Break));
+		assert!(decoder.ready_to_finish(false).unwrap());
 	}
 
 	#[test]
 	fn decode_map_segmented_odd() {
-		let mut decoder = StreamDecoder::new();
-		decoder.feed_slice(b"\xBF\x00\xFF");
-		decode_test!(match decoder: Some(StreamEvent::UnknownLengthMap));
-		decode_test!(match decoder: Some(_));
-		assert!(!decoder.ready_to_finish(false));
+		let mut decoder = StreamDecoder::new(Cursor::new(b"\xBF\x00\xFF"));
+		decode_test!(match decoder: Ok(StreamEvent::UnknownLengthMap));
+		decode_test!(match decoder: Ok(_));
+		assert!(!decoder.ready_to_finish(false).unwrap());
 	}
 
 	#[test]
 	fn decode_tag() {
-		let mut decoder = StreamDecoder::new();
-		decoder.feed_slice(b"\xC1\x00");
-		decode_test!(match decoder: Some(StreamEvent::Tag(1)));
-		assert!(!decoder.ready_to_finish(false));
-		decode_test!(match decoder: Some(_));
-		assert!(decoder.ready_to_finish(false));
+		let mut decoder = StreamDecoder::new(Cursor::new(b"\xC1\x00"));
+		decode_test!(match decoder: Ok(StreamEvent::Tag(1)));
+		assert!(!decoder.ready_to_finish(false).unwrap());
+		decode_test!(match decoder: Ok(_));
+		assert!(decoder.ready_to_finish(false).unwrap());
 	}
 
 	#[test]
 	fn decode_simple_tiny() {
 		for n in 0..=23 {
-			decode_test!([0xE0 | n] => StreamEvent::Simple(x) if x == n);
+			decode_test!([0xE0 | n] => Ok(StreamEvent::Simple(x)) if x == n);
 		}
 	}
 
 	#[test]
 	fn decode_simple_8bit() {
 		for n in 24..=255 {
-			decode_test!([0xF8, n] => StreamEvent::Simple(x) if x == n);
+			decode_test!([0xF8, n] => Ok(StreamEvent::Simple(x)) if x == n);
 		}
 	}
 
 	#[test]
 	fn decode_float_64bit() {
-		decode_test!(ref b"\xFB\x7F\xF0\x00\x00\x00\x00\x00\x00" => StreamEvent::Float(n) if n == f64::INFINITY);
+		decode_test!(b"\xFB\x7F\xF0\x00\x00\x00\x00\x00\x00" => Ok(StreamEvent::Float(n)) if n == f64::INFINITY);
 	}
 
 	#[test]
 	fn decode_float_32bit() {
-		decode_test!(ref b"\xFA\x3F\x80\x00\x00" => StreamEvent::Float(n) if n == 1.0);
-	}
-
-	#[cfg(not(feature = "half"))]
-	#[test]
-	fn decode_float_16bit() {
-		let mut decoder = StreamDecoder::new();
-		decoder.feed_slice(b"\xF9\x00\x00");
-		match decoder.next_event() {
-			Err(DecodeError::NoHalfFloatSupport) => (),
-			x => panic!("got {:?} when decoding a half-float", x),
-		}
+		decode_test!(b"\xFA\x3F\x80\x00\x00" => Ok(StreamEvent::Float(n)) if n == 1.0);
 	}
 
 	#[cfg(feature = "half")]
 	#[test]
 	fn decode_float_16bit() {
-		decode_test!(ref b"\xF9\x00\x00" => StreamEvent::Float(n) if n == 0.0);
+		decode_test!(b"\xF9\x00\x00" => Ok(StreamEvent::Float(n)) if n == 0.0);
 	}
 }
