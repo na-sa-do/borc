@@ -283,11 +283,6 @@ impl<T: Read> StreamDecoder<T> {
 								n => (StreamEvent::Simple(n), 2),
 							}
 						}
-						#[cfg(not(feature = "half"))]
-						25 => {
-							return Err(DecodeError::NoHalfFloatSupport);
-						}
-						#[cfg(feature = "half")]
 						25 => {
 							bounds_check!(2);
 							let mut bytes = [0u8; 2];
@@ -747,17 +742,6 @@ mod test {
 	#[test]
 	fn decode_float_32bit() {
 		decode_test!(b"\xFA\x3F\x80\x00\x00" => Ok(StreamEvent::Float(n)) if n == 1.0);
-	}
-
-	#[cfg(not(feature = "half"))]
-	#[test]
-	fn decode_float_16bit() {
-		let mut decoder = StreamDecoder::new();
-		decoder.feed_slice(b"\xF9\x00\x00");
-		match decoder.next_event() {
-			Err(DecodeError::NoHalfFloatSupport) => (),
-			x => panic!("got {:?} when decoding a half-float", x),
-		}
 	}
 
 	#[cfg(feature = "half")]
