@@ -375,7 +375,7 @@ pub enum StreamEvent {
 	///
 	/// The actual value of the integer is -1 minus the provided value.
 	/// Some integers that can be CBOR encoded underflow [`i64`].
-	/// Use one of the `interpret_signed` associated functions if you don't care about that.
+	/// Use one of the `interpret_signed` associated functions to resolve this.
 	Signed(u64),
 	/// A byte string.
 	ByteString(Vec<u8>),
@@ -447,6 +447,31 @@ impl StreamEvent {
 	/// This function does not overflow, because it returns an [`i128`].
 	pub fn interpret_signed_wide(val: u64) -> i128 {
 		-1 - (val as i128)
+	}
+
+	/// Create a [`StreamEvent::Signed`] or [`StreamEvent::Unsigned`] value.
+	pub fn create_signed(val: i64) -> StreamEvent {
+		if val.is_negative() {
+			StreamEvent::Signed(val.abs_diff(-1))
+		} else {
+			StreamEvent::Unsigned(val as _)
+		}
+	}
+
+	/// Create a [`StreamEvent::Signed`] or [`StreamEvent::Unsigned`] value.
+	///
+	/// Because this takes an [`i128`], it can express all the numbers CBOR can encode.
+	/// However, some [`i128`]s cannot be encoded in basic CBOR integers.
+	/// In this case, it will return [`None`].
+	pub fn create_signed_wide(val: i128) -> Option<StreamEvent> {
+		if val.is_negative() {
+			match val.abs_diff(-1).try_into() {
+				Ok(val) => Some(StreamEvent::Signed(val)),
+				Err(_) => None,
+			}
+		} else {
+			Some(StreamEvent::Unsigned(val as _))
+		}
 	}
 }
 
@@ -668,6 +693,26 @@ mod test {
 			StreamEvent::interpret_signed_wide(u64::MAX),
 			-1 - u64::MAX as i128
 		);
+	}
+
+	#[test]
+	fn create_signed() {
+		assert!(matches!(
+			StreamEvent::create_signed(0),
+			StreamEvent::Unsigned(0)
+		));
+		assert!(matches!(
+			StreamEvent::create_signed(22),
+			StreamEvent::Unsigned(22)
+		));
+		assert!(matches!(
+			StreamEvent::create_signed(-1),
+			StreamEvent::Signed(0)
+		));
+		assert!(matches!(
+			StreamEvent::create_signed(-22),
+			StreamEvent::Signed(21)
+		));
 	}
 
 	#[test]
