@@ -478,11 +478,15 @@ impl StreamEvent {
 /// A streaming CBOR encoder.
 pub struct StreamEncoder<T: Write> {
 	dest: T,
+	pending: Vec<Pending>,
 }
 
 impl<T: Write> StreamEncoder<T> {
 	pub fn new(dest: T) -> Self {
-		StreamEncoder { dest }
+		StreamEncoder {
+			dest,
+			pending: Vec::new(),
+		}
 	}
 
 	pub fn feed_event(&mut self, event: StreamEvent) -> Result<(), EncodeError> {
@@ -523,7 +527,10 @@ impl<T: Write> StreamEncoder<T> {
 				write_initial_and_argument!(2, bytes.len() as _);
 				self.dest.write_all(&bytes)?;
 			}
-			StreamEvent::UnknownLengthByteString => todo!(),
+			StreamEvent::UnknownLengthByteString => {
+				self.dest.write_all(&[0x5F])?;
+				self.pending.push(Pending::Break);
+			}
 			StreamEvent::TextString(_) => todo!(),
 			StreamEvent::UnknownLengthTextString => todo!(),
 			StreamEvent::Array(_) => todo!(),
@@ -533,10 +540,17 @@ impl<T: Write> StreamEncoder<T> {
 			StreamEvent::Tag(_) => todo!(),
 			StreamEvent::Float(_) => todo!(),
 			StreamEvent::Simple(_) => todo!(),
-			StreamEvent::Break => todo!(),
+			StreamEvent::Break => match self.pending.pop() {
+				Some(Pending::Break) => self.dest.write_all(&[0xFF])?,
+				_ => return Err(EncodeError::InvalidBreak),
+			},
 		}
 
 		Ok(())
+	}
+
+	pub fn ready_to_finish(&self) -> bool {
+		self.pending.is_empty()
 	}
 }
 
@@ -782,6 +796,27 @@ mod test {
 		decode_test!(match decoder: Ok(StreamEvent::ByteString(x)) if x == b"abcd");
 		decode_test!(match decoder: Err(DecodeError::Insufficient));
 		assert!(!decoder.ready_to_finish(false).unwrap());
+	}
+
+	#[test]
+	fn encode_bytes_segmented() {
+		let mut output = Vec::new();
+		let mut encoder = StreamEncoder::new(Cursor::new(&mut output));
+		encoder
+			.feed_event(StreamEvent::UnknownLengthByteString)
+			.unwrap();
+		assert!(!encoder.ready_to_finish());
+		encoder
+			.feed_event(StreamEvent::ByteString(b"abcd".to_vec()))
+			.unwrap();
+		assert!(!encoder.ready_to_finish());
+		encoder
+			.feed_event(StreamEvent::ByteString(b"efg".to_vec()))
+			.unwrap();
+		assert!(!encoder.ready_to_finish());
+		encoder.feed_event(StreamEvent::Break).unwrap();
+		assert!(encoder.ready_to_finish());
+		assert_eq!(output, b"\x5F\x44abcd\x43efg\xFF");
 	}
 
 	#[test]

@@ -28,4 +28,6 @@ pub enum EncodeError {
 	Insufficient,
 	#[error("{0}")]
 	IoError(#[from] std::io::Error),
+	#[error("break at invalid time")]
+	InvalidBreak,
 }
