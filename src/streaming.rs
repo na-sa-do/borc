@@ -531,8 +531,14 @@ impl<T: Write> StreamEncoder<T> {
 				self.dest.write_all(&[0x5F])?;
 				self.pending.push(Pending::Break);
 			}
-			StreamEvent::TextString(_) => todo!(),
-			StreamEvent::UnknownLengthTextString => todo!(),
+			StreamEvent::TextString(text) => {
+				write_initial_and_argument!(3, text.len() as _);
+				self.dest.write_all(text.as_bytes())?;
+			}
+			StreamEvent::UnknownLengthTextString => {
+				self.dest.write_all(&[0x7F])?;
+				self.pending.push(Pending::Break);
+			}
 			StreamEvent::Array(_) => todo!(),
 			StreamEvent::UnknownLengthArray => todo!(),
 			StreamEvent::Map(_) => todo!(),
@@ -769,7 +775,7 @@ mod test {
 		test!(0x30, [0x58, 0x30]);
 		test!(0x02FA, [0x59, 0x02, 0xFA]);
 		test!(0x010000, [0x5A, 0x00, 0x01, 0x00, 0x00]);
-		// Allocates about 8 GiB of memory! And iterates 4Gi times! Wow!
+		// Allocates about 12 GiB of memory! And iterates 4Gi times! Wow!
 		test!(
 			2usize.pow(32),
 			[0x5B, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]
@@ -836,6 +842,40 @@ mod test {
 	}
 
 	#[test]
+	fn encode_text() {
+		encode_test!(StreamEvent::TextString("".to_string()) => b"\x60");
+		encode_test!(StreamEvent::TextString("abcd".to_string()) => b"\x64abcd");
+
+		macro_rules! test {
+			($size:expr, $prefix:expr) => {
+				let size: usize = $size;
+				let prefix = $prefix;
+				let input = {
+					let mut it = Vec::with_capacity(size);
+					it.resize(size, b"A"[0]);
+					unsafe { String::from_utf8_unchecked(it) }
+				};
+				let mut output = Vec::with_capacity(size + prefix.len());
+				let mut encoder = StreamEncoder::new(Cursor::new(&mut output));
+				encoder
+					.feed_event(StreamEvent::TextString(input.clone()))
+					.unwrap();
+				assert_eq!(output[..prefix.len()], prefix);
+				assert_eq!(output[prefix.len()..], input.into_bytes());
+			};
+		}
+
+		test!(0x30, [0x78, 0x30]);
+		test!(0x02FA, [0x79, 0x02, 0xFA]);
+		test!(0x010000, [0x7A, 0x00, 0x01, 0x00, 0x00]);
+		// Allocates about 12 GiB of memory! And iterates 4Gi times! Wowie wow wow!
+		test!(
+			2usize.pow(32),
+			[0x7B, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]
+		);
+	}
+
+	#[test]
 	fn decode_text_segmented() {
 		let mut decoder = StreamDecoder::new(Cursor::new(b"\x7F\x64abcd\x63efg\xFF"));
 		decode_test!(match decoder: Ok(StreamEvent::UnknownLengthTextString));
@@ -864,6 +904,27 @@ mod test {
 			Err(DecodeError::InvalidUtf8(_)) => (),
 			_ => panic!("accepted invalid UTF-8"),
 		}
+	}
+
+	#[test]
+	fn encode_text_segmented() {
+		let mut output = Vec::new();
+		let mut encoder = StreamEncoder::new(Cursor::new(&mut output));
+		encoder
+			.feed_event(StreamEvent::UnknownLengthTextString)
+			.unwrap();
+		assert!(!encoder.ready_to_finish());
+		encoder
+			.feed_event(StreamEvent::TextString("abcd".to_string()))
+			.unwrap();
+		assert!(!encoder.ready_to_finish());
+		encoder
+			.feed_event(StreamEvent::TextString("efg".to_string()))
+			.unwrap();
+		assert!(!encoder.ready_to_finish());
+		encoder.feed_event(StreamEvent::Break).unwrap();
+		assert!(encoder.ready_to_finish());
+		assert_eq!(output, b"\x7F\x64abcd\x63efg\xFF");
 	}
 
 	#[test]
