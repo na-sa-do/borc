@@ -491,22 +491,22 @@ impl<T: Write> StreamEncoder<T> {
 				let major: u8 = $major << 5;
 				match $argument {
 					n if n <= 0x17 => {
-						self.dest.write(&[major | n as u8])?;
+						self.dest.write_all(&[major | n as u8])?;
 					}
 					n if n <= u8::MAX as _ => {
-						self.dest.write(&[major | 0x18, n as u8])?;
+						self.dest.write_all(&[major | 0x18, n as u8])?;
 					}
 					n if n <= u16::MAX as _ => {
-						self.dest.write(&[major | 0x19])?;
-						self.dest.write(&u16::to_be_bytes(n as _))?;
+						self.dest.write_all(&[major | 0x19])?;
+						self.dest.write_all(&u16::to_be_bytes(n as _))?;
 					}
 					n if n <= u32::MAX as _ => {
-						self.dest.write(&[major | 0x1A])?;
-						self.dest.write(&u32::to_be_bytes(n as _))?;
+						self.dest.write_all(&[major | 0x1A])?;
+						self.dest.write_all(&u32::to_be_bytes(n as _))?;
 					}
 					n => {
-						self.dest.write(&[major | 0x1B])?;
-						self.dest.write(&u64::to_be_bytes(n))?;
+						self.dest.write_all(&[major | 0x1B])?;
+						self.dest.write_all(&u64::to_be_bytes(n))?;
 					}
 				}
 			};
