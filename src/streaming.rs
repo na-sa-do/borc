@@ -736,17 +736,17 @@ mod test {
 		macro_rules! test {
 			($size:expr, $prefix:expr) => {
 				let size: usize = $size;
+				let prefix = $prefix;
 				let input = {
 					let mut it = Vec::with_capacity(size);
 					it.resize(size, 0x0Fu8);
 					it
 				};
-				let mut output = Vec::with_capacity(size);
+				let mut output = Vec::with_capacity(size + prefix.len());
 				let mut encoder = StreamEncoder::new(Cursor::new(&mut output));
 				encoder
 					.feed_event(StreamEvent::ByteString(input.clone()))
 					.unwrap();
-				let prefix = $prefix;
 				assert_eq!(output[..prefix.len()], prefix);
 				assert_eq!(output[prefix.len()..], input);
 			};
