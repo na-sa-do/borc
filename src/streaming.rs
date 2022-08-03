@@ -519,7 +519,10 @@ impl<T: Write> StreamEncoder<T> {
 			StreamEvent::Signed(n) => {
 				write_initial_and_argument!(1, n);
 			}
-			StreamEvent::ByteString(_) => todo!(),
+			StreamEvent::ByteString(bytes) => {
+				write_initial_and_argument!(2, bytes.len() as _);
+				self.dest.write_all(&bytes)?;
+			}
 			StreamEvent::UnknownLengthByteString => todo!(),
 			StreamEvent::TextString(_) => todo!(),
 			StreamEvent::UnknownLengthTextString => todo!(),
@@ -723,6 +726,40 @@ mod test {
 		decode_test!(b"\x59\x00\x07Goodbye" => Ok(StreamEvent::ByteString(x)) if x == b"Goodbye");
 		decode_test!(b"\x5A\x00\x00\x00\x0DLong message!" => Ok(StreamEvent::ByteString(x)) if x == b"Long message!");
 		decode_test!(b"\x5B\x00\x00\x00\x00\x00\x00\x00\x01?" => Ok(StreamEvent::ByteString(x)) if x == b"?");
+	}
+
+	#[test]
+	fn encode_bytes() {
+		encode_test!(StreamEvent::ByteString(b"".to_vec()) => b"\x40");
+		encode_test!(StreamEvent::ByteString(b"abcd".to_vec()) => b"\x44abcd");
+
+		macro_rules! test {
+			($size:expr, $prefix:expr) => {
+				let size: usize = $size;
+				let input = {
+					let mut it = Vec::with_capacity(size);
+					it.resize(size, 0x0Fu8);
+					it
+				};
+				let mut output = Vec::with_capacity(size);
+				let mut encoder = StreamEncoder::new(Cursor::new(&mut output));
+				encoder
+					.feed_event(StreamEvent::ByteString(input.clone()))
+					.unwrap();
+				let prefix = $prefix;
+				assert_eq!(output[..prefix.len()], prefix);
+				assert_eq!(output[prefix.len()..], input);
+			};
+		}
+
+		test!(0x30, [0x58, 0x30]);
+		test!(0x02FA, [0x59, 0x02, 0xFA]);
+		test!(0x010000, [0x5A, 0x00, 0x01, 0x00, 0x00]);
+		// Allocates about 8 GiB of memory! And iterates 4Gi times! Wow!
+		test!(
+			2usize.pow(32),
+			[0x5B, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]
+		);
 	}
 
 	#[test]
