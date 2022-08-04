@@ -744,7 +744,6 @@ mod test {
 		decode_test!(b"\xFA\x3F\x80\x00\x00" => Ok(StreamEvent::Float(n)) if n == 1.0);
 	}
 
-	#[cfg(feature = "half")]
 	#[test]
 	fn decode_float_16bit() {
 		decode_test!(b"\xF9\x00\x00" => Ok(StreamEvent::Float(n)) if n == 0.0);
