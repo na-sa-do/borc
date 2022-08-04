@@ -621,19 +621,26 @@ mod test {
 	}
 
 	macro_rules! encode_test {
-		($($in:expr),+ => $out:expr, check finish if $cond:expr; $event:ident) => {
+		($($in:expr),+ => $out:expr, check finish if $cond:expr, expecting $expect:expr; $event:ident) => {
 			let mut buf = Vec::new();
 			let mut encoder = StreamEncoder::new(Cursor::new(&mut buf));
-			for $event in [$($in),+] {
+			for (idx, $event) in [$($in),+].into_iter().enumerate() {
 				let check_finish = $cond;
+				let expected = $expect;
 				encoder.feed_event($event).unwrap();
 				if check_finish {
-					assert!(!encoder.ready_to_finish());
+					assert_eq!(encoder.ready_to_finish(), expected, "readiness to finish was not as expected after event #{}", idx);
 				}
 			}
 			assert!(encoder.ready_to_finish());
 			std::mem::drop(encoder);
 			assert_eq!(buf, $out);
+		};
+		($($in:expr),+ => $out:expr, check finish expecting $expect:expr; $event:ident) => {
+			encode_test!($($in),+ => $out, check finish if true, expecting $expect; $event);
+		};
+		($($in:expr),+ => $out:expr, check finish if $cond:expr; $event:ident) => {
+			encode_test!($($in),+ => $out, check finish if $cond, expecting true; $event);
 		};
 		($($in:expr),+ => $out:expr) => {
 			encode_test!($($in),+ => $out, check finish if false; event);
@@ -838,23 +845,14 @@ mod test {
 
 	#[test]
 	fn encode_bytes_segmented() {
-		let mut output = Vec::new();
-		let mut encoder = StreamEncoder::new(Cursor::new(&mut output));
-		encoder
-			.feed_event(StreamEvent::UnknownLengthByteString)
-			.unwrap();
-		assert!(!encoder.ready_to_finish());
-		encoder
-			.feed_event(StreamEvent::ByteString(b"abcd".to_vec()))
-			.unwrap();
-		assert!(!encoder.ready_to_finish());
-		encoder
-			.feed_event(StreamEvent::ByteString(b"efg".to_vec()))
-			.unwrap();
-		assert!(!encoder.ready_to_finish());
-		encoder.feed_event(StreamEvent::Break).unwrap();
-		assert!(encoder.ready_to_finish());
-		assert_eq!(output, b"\x5F\x44abcd\x43efg\xFF");
+		encode_test!(
+			StreamEvent::UnknownLengthByteString,
+			StreamEvent::ByteString(b"abcd".to_vec()),
+			StreamEvent::ByteString(b"efg".to_vec()),
+			StreamEvent::Break
+			=> b"\x5F\x44abcd\x43efg\xFF",
+			check finish expecting matches!(event, StreamEvent::Break); event
+		);
 	}
 
 	#[test]
@@ -940,23 +938,14 @@ mod test {
 
 	#[test]
 	fn encode_text_segmented() {
-		let mut output = Vec::new();
-		let mut encoder = StreamEncoder::new(Cursor::new(&mut output));
-		encoder
-			.feed_event(StreamEvent::UnknownLengthTextString)
-			.unwrap();
-		assert!(!encoder.ready_to_finish());
-		encoder
-			.feed_event(StreamEvent::TextString("abcd".to_string()))
-			.unwrap();
-		assert!(!encoder.ready_to_finish());
-		encoder
-			.feed_event(StreamEvent::TextString("efg".to_string()))
-			.unwrap();
-		assert!(!encoder.ready_to_finish());
-		encoder.feed_event(StreamEvent::Break).unwrap();
-		assert!(encoder.ready_to_finish());
-		assert_eq!(output, b"\x7F\x64abcd\x63efg\xFF");
+		encode_test!(
+			StreamEvent::UnknownLengthTextString,
+			StreamEvent::TextString("abcd".to_string()),
+			StreamEvent::TextString("efg".to_string()),
+			StreamEvent::Break
+			=> b"\x7F\x64abcd\x63efg\xFF",
+			check finish expecting matches!(event, StreamEvent::Break); event
+		);
 	}
 
 	#[test]
@@ -986,7 +975,7 @@ mod test {
 			StreamEvent::Unsigned(2),
 			StreamEvent::Unsigned(3)
 			=> b"\x83\x01\x02\x03",
-			check finish if !matches!(event, StreamEvent::Unsigned(3)); event
+			check finish expecting matches!(event, StreamEvent::Unsigned(3)); event
 		);
 	}
 
@@ -1014,7 +1003,7 @@ mod test {
 			StreamEvent::Unsigned(3),
 			StreamEvent::Break
 			=> b"\x9F\x01\x02\x03\xFF",
-			check finish if !matches!(event, StreamEvent::Break); event
+			check finish if matches!(event, StreamEvent::Break); event
 		);
 	}
 
