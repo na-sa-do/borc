@@ -516,6 +516,21 @@ impl<T: Write> StreamEncoder<T> {
 			};
 		}
 
+		let mut pop_pending = false;
+		match self.pending.last_mut() {
+			Some(Pending::Array(ref mut n)) => {
+				*n -= 1;
+				if *n == 0 {
+					pop_pending = true;
+				}
+			}
+			Some(Pending::Break) | None => (),
+			_ => unreachable!(),
+		}
+		if pop_pending {
+			self.pending.pop();
+		}
+
 		match event {
 			StreamEvent::Unsigned(n) => {
 				write_initial_and_argument!(0, n);
@@ -539,8 +554,14 @@ impl<T: Write> StreamEncoder<T> {
 				self.dest.write_all(&[0x7F])?;
 				self.pending.push(Pending::Break);
 			}
-			StreamEvent::Array(_) => todo!(),
-			StreamEvent::UnknownLengthArray => todo!(),
+			StreamEvent::Array(n) => {
+				write_initial_and_argument!(4, n);
+				self.pending.push(Pending::Array(n));
+			}
+			StreamEvent::UnknownLengthArray => {
+				self.dest.write_all(&[0x9F])?;
+				self.pending.push(Pending::Break);
+			}
 			StreamEvent::Map(_) => todo!(),
 			StreamEvent::UnknownLengthMap => todo!(),
 			StreamEvent::Tag(_) => todo!(),
@@ -600,15 +621,26 @@ mod test {
 	}
 
 	macro_rules! encode_test {
-		($($in:expr),+ => $out:expr) => {
+		($($in:expr),+ => $out:expr, check finish if $cond:expr; $event:ident) => {
 			let mut buf = Vec::new();
 			let mut encoder = StreamEncoder::new(Cursor::new(&mut buf));
-			for event in [$($in),+] {
-				encoder.feed_event(event).unwrap();
+			for $event in [$($in),+] {
+				let check_finish = $cond;
+				encoder.feed_event($event).unwrap();
+				if check_finish {
+					assert!(!encoder.ready_to_finish());
+				}
 			}
+			assert!(encoder.ready_to_finish());
 			std::mem::drop(encoder);
 			assert_eq!(buf, $out);
-		}
+		};
+		($($in:expr),+ => $out:expr) => {
+			encode_test!($($in),+ => $out, check finish if false; event);
+		};
+		($($in:expr),+ => $out:expr, check finish) => {
+			encode_test!($($in),+ => $out, check finish if true; event);
+		};
 	}
 
 	#[test]
@@ -947,6 +979,18 @@ mod test {
 	}
 
 	#[test]
+	fn encode_array() {
+		encode_test!(
+			StreamEvent::Array(3),
+			StreamEvent::Unsigned(1),
+			StreamEvent::Unsigned(2),
+			StreamEvent::Unsigned(3)
+			=> b"\x83\x01\x02\x03",
+			check finish if !matches!(event, StreamEvent::Unsigned(3)); event
+		);
+	}
+
+	#[test]
 	fn decode_array_segmented() {
 		let mut decoder = StreamDecoder::new(Cursor::new(b"\x9F\x00\x00\x00\xFF"));
 		decode_test!(match decoder: Ok(StreamEvent::UnknownLengthArray));
@@ -959,6 +1003,19 @@ mod test {
 		assert!(!decoder.ready_to_finish(false).unwrap());
 		decode_test!(match decoder: Ok(StreamEvent::Break));
 		assert!(decoder.ready_to_finish(false).unwrap());
+	}
+
+	#[test]
+	fn encode_array_segmented() {
+		encode_test!(
+			StreamEvent::UnknownLengthArray,
+			StreamEvent::Unsigned(1),
+			StreamEvent::Unsigned(2),
+			StreamEvent::Unsigned(3),
+			StreamEvent::Break
+			=> b"\x9F\x01\x02\x03\xFF",
+			check finish if !matches!(event, StreamEvent::Break); event
+		);
 	}
 
 	#[test]
