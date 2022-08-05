@@ -587,7 +587,22 @@ impl<T: Write> StreamEncoder<T> {
 				write_initial_and_argument!(6, n);
 				self.pending.push(Pending::Tag);
 			}
-			StreamEvent::Float(_) => todo!(),
+			StreamEvent::Float(n64) => {
+				let n32 = n64 as f32;
+				if n32 as f64 == n64 {
+					let n16 = half::f16::from_f64(n64);
+					if n16.to_f64() == n64 {
+						self.dest.write_all(&[0xF9])?;
+						self.dest.write_all(&n16.to_be_bytes())?;
+					} else {
+						self.dest.write_all(&[0xFA])?;
+						self.dest.write_all(&n32.to_be_bytes())?;
+					}
+				} else {
+					self.dest.write_all(&[0xFB])?;
+					self.dest.write_all(&n64.to_be_bytes())?;
+				}
+			}
 			StreamEvent::Simple(n) => {
 				// The CBOR spec requires that simple values 0-24 be encoded as a single byte,
 				// and simple values 25-255 be encoded as two bytes.
@@ -1165,12 +1180,27 @@ mod test {
 	}
 
 	#[test]
+	fn encode_float_64bit() {
+		encode_test!(StreamEvent::Float(1.0000000000000002f64) => b"\xFB\x3F\xF0\x00\x00\x00\x00\x00\x01");
+	}
+
+	#[test]
 	fn decode_float_32bit() {
 		decode_test!(b"\xFA\x3F\x80\x00\x00" => Ok(StreamEvent::Float(n)) if n == 1.0);
 	}
 
 	#[test]
+	fn encode_float_32bit() {
+		encode_test!(StreamEvent::Float(0.999999940395355225f32 as f64) => b"\xFA\x3F\x7F\xFF\xFF");
+	}
+
+	#[test]
 	fn decode_float_16bit() {
 		decode_test!(b"\xF9\x00\x00" => Ok(StreamEvent::Float(n)) if n == 0.0);
+	}
+
+	#[test]
+	fn encode_float_16bit() {
+		encode_test!(StreamEvent::Float(f64::INFINITY) => b"\xF9\x7C\x00");
 	}
 }
