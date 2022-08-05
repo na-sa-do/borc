@@ -588,7 +588,16 @@ impl<T: Write> StreamEncoder<T> {
 				self.pending.push(Pending::Tag);
 			}
 			StreamEvent::Float(_) => todo!(),
-			StreamEvent::Simple(_) => todo!(),
+			StreamEvent::Simple(n) => {
+				// The CBOR spec requires that simple values 0-24 be encoded as a single byte,
+				// and simple values 25-255 be encoded as two bytes.
+				// Why this is required when overlong arguments are otherwise legal is a mystery to me,
+				// but in any case, we always generate the shortest encoding anyway, so it's fine.
+				//
+				// Also, since n is a u8, it'll never exceed 255, so we can just do this:
+				write_initial_and_argument!(7, n as _);
+				// and not worry about accidentally generating the prefix to a float.
+			}
 			StreamEvent::Break => match self.pending.pop() {
 				Some(Pending::Break | Pending::UnknownLengthMap(false)) => {
 					self.dest.write_all(&[0xFF])?
@@ -1130,9 +1139,23 @@ mod test {
 	}
 
 	#[test]
+	fn encode_simple_tiny() {
+		for n in 0..=23 {
+			encode_test!(StreamEvent::Simple(n) => [0xE0 | n]);
+		}
+	}
+
+	#[test]
 	fn decode_simple_8bit() {
 		for n in 24..=255 {
 			decode_test!([0xF8, n] => Ok(StreamEvent::Simple(x)) if x == n);
+		}
+	}
+
+	#[test]
+	fn encode_simple_8bit() {
+		for n in 24..=255 {
+			encode_test!(StreamEvent::Simple(n) => [0xF8, n]);
 		}
 	}
 
