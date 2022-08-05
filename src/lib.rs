@@ -1,5 +1,5 @@
 mod errors;
 mod streaming;
 
-pub use errors::DecodeError;
-pub use streaming::{StreamDecoder, StreamEvent};
+pub use errors::{DecodeError, EncodeError};
+pub use streaming::{StreamDecoder, StreamEncoder, StreamEvent};

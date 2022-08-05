@@ -14,8 +14,20 @@ pub enum DecodeError {
 	Insufficient,
 	#[error("invalid UTF-8: {0}")]
 	InvalidUtf8(#[from] FromUtf8Error),
-	#[error("implementation does not support half-width floats")]
-	NoHalfFloatSupport,
 	#[error("{0}")]
 	IoError(#[from] std::io::Error),
+}
+
+// Errors that can occur when encoding CBOR.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum EncodeError {
+	#[error("excess data")]
+	Excess,
+	#[error("insufficient data")]
+	Insufficient,
+	#[error("{0}")]
+	IoError(#[from] std::io::Error),
+	#[error("break at invalid time")]
+	InvalidBreak,
 }
