@@ -520,9 +520,20 @@ impl<T: Write> StreamEncoder<T> {
 		match self.pending.last_mut() {
 			Some(Pending::Array(ref mut n)) => {
 				*n -= 1;
-				if *n == 0 {
-					pop_pending = true;
-				}
+				pop_pending = *n == 0;
+			}
+			Some(Pending::Map(ref mut n, ref mut can_stop)) => {
+				*can_stop = match *can_stop {
+					true => false,
+					false => {
+						*n -= 1;
+						pop_pending = *n == 0;
+						true
+					}
+				};
+			}
+			Some(Pending::UnknownLengthMap(ref mut can_stop)) => {
+				*can_stop = !*can_stop;
 			}
 			Some(Pending::Break) | None => (),
 			_ => unreachable!(),
@@ -562,13 +573,21 @@ impl<T: Write> StreamEncoder<T> {
 				self.dest.write_all(&[0x9F])?;
 				self.pending.push(Pending::Break);
 			}
-			StreamEvent::Map(_) => todo!(),
-			StreamEvent::UnknownLengthMap => todo!(),
+			StreamEvent::Map(n) => {
+				write_initial_and_argument!(5, n);
+				self.pending.push(Pending::Map(n, true));
+			}
+			StreamEvent::UnknownLengthMap => {
+				self.dest.write_all(&[0xBF])?;
+				self.pending.push(Pending::UnknownLengthMap(true));
+			}
 			StreamEvent::Tag(_) => todo!(),
 			StreamEvent::Float(_) => todo!(),
 			StreamEvent::Simple(_) => todo!(),
 			StreamEvent::Break => match self.pending.pop() {
-				Some(Pending::Break) => self.dest.write_all(&[0xFF])?,
+				Some(Pending::Break | Pending::UnknownLengthMap(false)) => {
+					self.dest.write_all(&[0xFF])?
+				}
 				_ => return Err(EncodeError::InvalidBreak),
 			},
 		}
@@ -1003,7 +1022,7 @@ mod test {
 			StreamEvent::Unsigned(3),
 			StreamEvent::Break
 			=> b"\x9F\x01\x02\x03\xFF",
-			check finish if matches!(event, StreamEvent::Break); event
+			check finish expecting matches!(event, StreamEvent::Break); event
 		);
 	}
 
@@ -1027,6 +1046,19 @@ mod test {
 	}
 
 	#[test]
+	fn encode_map() {
+		encode_test!(
+			StreamEvent::Map(2),
+			StreamEvent::Unsigned(0),
+			StreamEvent::TextString("a".to_string()),
+			StreamEvent::Unsigned(1),
+			StreamEvent::TextString("b".to_string())
+			=> b"\xA2\x00\x61a\x01\x61b",
+			check finish expecting matches!(event, StreamEvent::TextString(ref s) if s == "b"); event
+		);
+	}
+
+	#[test]
 	fn decode_map_segmented() {
 		let mut decoder = StreamDecoder::new(Cursor::new(b"\xBF\x00\x00\x00\x00\xFF"));
 		decode_test!(match decoder: Ok(StreamEvent::UnknownLengthMap));
@@ -1043,6 +1075,21 @@ mod test {
 		assert!(decoder.ready_to_finish(false).unwrap());
 	}
 
+	#[test]
+	fn encode_map_segmented() {
+		encode_test!(
+			StreamEvent::UnknownLengthMap,
+			StreamEvent::Unsigned(0),
+			StreamEvent::TextString("a".to_string()),
+			StreamEvent::Unsigned(1),
+			StreamEvent::TextString("b".to_string()),
+			StreamEvent::Break
+			=> b"\xBF\x00\x61a\x01\x61b\xFF",
+			check finish expecting matches!(event, StreamEvent::Break); event
+		);
+	}
+
+	// TODO: Remove this test in favor of adding `check finish` features to decode_test!.
 	#[test]
 	fn decode_map_segmented_odd() {
 		let mut decoder = StreamDecoder::new(Cursor::new(b"\xBF\x00\xFF"));
