@@ -535,8 +535,10 @@ impl<T: Write> StreamEncoder<T> {
 			Some(Pending::UnknownLengthMap(ref mut can_stop)) => {
 				*can_stop = !*can_stop;
 			}
+			Some(Pending::Tag) => {
+				pop_pending = true;
+			}
 			Some(Pending::Break) | None => (),
-			_ => unreachable!(),
 		}
 		if pop_pending {
 			self.pending.pop();
@@ -581,7 +583,10 @@ impl<T: Write> StreamEncoder<T> {
 				self.dest.write_all(&[0xBF])?;
 				self.pending.push(Pending::UnknownLengthMap(true));
 			}
-			StreamEvent::Tag(_) => todo!(),
+			StreamEvent::Tag(n) => {
+				write_initial_and_argument!(6, n);
+				self.pending.push(Pending::Tag);
+			}
 			StreamEvent::Float(_) => todo!(),
 			StreamEvent::Simple(_) => todo!(),
 			StreamEvent::Break => match self.pending.pop() {
@@ -1105,6 +1110,16 @@ mod test {
 		assert!(!decoder.ready_to_finish(false).unwrap());
 		decode_test!(match decoder: Ok(_));
 		assert!(decoder.ready_to_finish(false).unwrap());
+	}
+
+	#[test]
+	fn encode_tag() {
+		encode_test!(
+			StreamEvent::Tag(1),
+			StreamEvent::Unsigned(0)
+			=> b"\xC1\x00",
+			check finish expecting matches!(event, StreamEvent::Unsigned(_)); event
+		);
 	}
 
 	#[test]
