@@ -3,9 +3,9 @@ use std::{
 	collections::VecDeque,
 	io::{Read, Write},
 	num::NonZeroUsize,
+	string::FromUtf8Error,
 };
-
-use crate::{DecodeError, EncodeError};
+use thiserror::Error;
 
 fn read_be_u16(input: &[u8]) -> u16 {
 	let mut bytes = [0u8; 2];
@@ -25,12 +25,25 @@ fn read_be_u64(input: &[u8]) -> u64 {
 	u64::from_be_bytes(bytes)
 }
 
-/// A streaming CBOR decoder with minimal logic.
-///
-/// [`StreamDecoder`] handles input buffering, retrying when new data arrives, and basic parsing.
-/// It does not enforce higher-level rules, instead aiming to represent the input data as faithfully as possible.
+/// Errors that can occur when decoding CBOR using [`Decoder`].
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum DecodeError {
+	#[error("malformed CBOR")]
+	Malformed,
+	#[error("excess data")]
+	Excess,
+	#[error("insufficient data")]
+	Insufficient,
+	#[error("invalid UTF-8: {0}")]
+	InvalidUtf8(#[from] FromUtf8Error),
+	#[error("{0}")]
+	IoError(#[from] std::io::Error),
+}
+
+/// A streaming decoder for the CBOR basic data model.
 #[derive(Debug, Clone)]
-pub struct StreamDecoder<T: Read> {
+pub struct Decoder<T: Read> {
 	source: RefCell<T>,
 	input_buffer: RefCell<VecDeque<u8>>,
 	pending: Vec<Pending>,
@@ -47,14 +60,14 @@ enum Pending {
 
 #[derive(Debug)]
 enum TryNextEventOutcome {
-	Event(StreamEvent),
+	GotEvent(Event),
 	Error(DecodeError),
 	Needs(NonZeroUsize),
 }
 
-impl<T: Read> StreamDecoder<T> {
+impl<T: Read> Decoder<T> {
 	pub fn new(source: T) -> Self {
-		StreamDecoder {
+		Decoder {
 			source: RefCell::new(source),
 			input_buffer: RefCell::new(VecDeque::with_capacity(128)),
 			pending: Vec::new(),
@@ -62,12 +75,12 @@ impl<T: Read> StreamDecoder<T> {
 	}
 
 	/// Pull an event from the decoder.
-	pub fn next_event(&mut self) -> Result<StreamEvent, DecodeError> {
+	pub fn next_event(&mut self) -> Result<Event, DecodeError> {
 		use TryNextEventOutcome::*;
 		self.input_buffer.get_mut().make_contiguous();
 		loop {
 			match self.try_next_event() {
-				Event(e) => return Ok(e),
+				GotEvent(e) => return Ok(e),
 				Error(e) => return Err(e),
 				Needs(n) => self.extend_input_buffer(n)?,
 			}
@@ -185,7 +198,7 @@ impl<T: Read> StreamDecoder<T> {
 					0 => {
 						let (val, offset) = read_argument!();
 						(
-							StreamEvent::Unsigned(match val {
+							Event::Unsigned(match val {
 								Some(x) => x,
 								None => return Error(DecodeError::Malformed),
 							}),
@@ -195,7 +208,7 @@ impl<T: Read> StreamDecoder<T> {
 					1 => {
 						let (val, offset) = read_argument!();
 						(
-							StreamEvent::Signed(match val {
+							Event::Signed(match val {
 								Some(x) => x,
 								None => return Error(DecodeError::Malformed),
 							}),
@@ -210,11 +223,11 @@ impl<T: Read> StreamDecoder<T> {
 								// remember that offset includes the initial
 								bounds_check!(len + offset - 1);
 								let contents = excess[offset - 1..len + offset - 1].to_owned();
-								(StreamEvent::ByteString(contents), len + offset)
+								(Event::ByteString(contents), len + offset)
 							}
 							None => {
 								self.pending.push(Pending::Break);
-								(StreamEvent::UnknownLengthByteString, 1)
+								(Event::UnknownLengthByteString, 1)
 							}
 						}
 					}
@@ -227,13 +240,13 @@ impl<T: Read> StreamDecoder<T> {
 								bounds_check!(len + offset - 1);
 								let contents = excess[offset - 1..len + offset - 1].to_owned();
 								match String::from_utf8(contents) {
-									Ok(s) => (StreamEvent::TextString(s), len + offset),
+									Ok(s) => (Event::TextString(s), len + offset),
 									Err(e) => return Error(e.into()),
 								}
 							}
 							None => {
 								self.pending.push(Pending::Break);
-								(StreamEvent::UnknownLengthTextString, 1)
+								(Event::UnknownLengthTextString, 1)
 							}
 						}
 					}
@@ -244,11 +257,11 @@ impl<T: Read> StreamDecoder<T> {
 								if len > 0 {
 									self.pending.push(Pending::Array(len));
 								}
-								(StreamEvent::Array(len), offset)
+								(Event::Array(len), offset)
 							}
 							None => {
 								self.pending.push(Pending::Break);
-								(StreamEvent::UnknownLengthArray, 1)
+								(Event::UnknownLengthArray, 1)
 							}
 						}
 					}
@@ -259,11 +272,11 @@ impl<T: Read> StreamDecoder<T> {
 								if len > 0 {
 									self.pending.push(Pending::Map(len, true));
 								}
-								(StreamEvent::Map(len), offset)
+								(Event::Map(len), offset)
 							}
 							None => {
 								self.pending.push(Pending::UnknownLengthMap(true));
-								(StreamEvent::UnknownLengthMap, 1)
+								(Event::UnknownLengthMap, 1)
 							}
 						}
 					}
@@ -272,7 +285,7 @@ impl<T: Read> StreamDecoder<T> {
 						match val {
 							Some(tag) => {
 								self.pending.push(Pending::Tag);
-								(StreamEvent::Tag(tag), offset)
+								(Event::Tag(tag), offset)
 							}
 							None => {
 								return Error(DecodeError::Malformed);
@@ -280,34 +293,31 @@ impl<T: Read> StreamDecoder<T> {
 						}
 					}
 					7 => match additional {
-						n @ 0..=23 => (StreamEvent::Simple(n), 1),
+						n @ 0..=23 => (Event::Simple(n), 1),
 						24 => {
 							bounds_check!(1);
 							match excess[0] {
 								0..=23 => return Error(DecodeError::Malformed),
-								n => (StreamEvent::Simple(n), 2),
+								n => (Event::Simple(n), 2),
 							}
 						}
 						25 => {
 							bounds_check!(2);
 							let mut bytes = [0u8; 2];
 							bytes.copy_from_slice(&excess[..2]);
-							(
-								StreamEvent::Float(half::f16::from_be_bytes(bytes).into()),
-								3,
-							)
+							(Event::Float(half::f16::from_be_bytes(bytes).into()), 3)
 						}
 						26 => {
 							bounds_check!(4);
 							let mut bytes = [0u8; 4];
 							bytes.copy_from_slice(&excess[..4]);
-							(StreamEvent::Float(f32::from_be_bytes(bytes).into()), 5)
+							(Event::Float(f32::from_be_bytes(bytes).into()), 5)
 						}
 						27 => {
 							bounds_check!(8);
 							let mut bytes = [0u8; 8];
 							bytes.copy_from_slice(&excess[..8]);
-							(StreamEvent::Float(f64::from_be_bytes(bytes)), 9)
+							(Event::Float(f64::from_be_bytes(bytes)), 9)
 						}
 						28..=30 => return Error(DecodeError::Malformed),
 						31 => {
@@ -316,7 +326,7 @@ impl<T: Read> StreamDecoder<T> {
 								Some(Pending::Break) | Some(Pending::UnknownLengthMap(false)) => (),
 								_ => return Error(DecodeError::Malformed),
 							}
-							(StreamEvent::Break, 1)
+							(Event::Break, 1)
 						}
 						32..=u8::MAX => unreachable!(),
 					},
@@ -324,7 +334,7 @@ impl<T: Read> StreamDecoder<T> {
 				}
 			};
 			input.drain(0..size);
-			Event(event)
+			GotEvent(event)
 		}
 	}
 
@@ -356,7 +366,7 @@ impl<T: Read> StreamDecoder<T> {
 
 	/// End the decoding.
 	///
-	/// This will return the [`StreamDecoder`] if there is excess data and the `ignore_excess` parameter is false.
+	/// This will return the [`Decoder`] if there is excess data and the `ignore_excess` parameter is false.
 	pub fn finish(self, ignore_excess: bool) -> Result<Option<Self>, std::io::Error> {
 		if self.ready_to_finish(ignore_excess)? {
 			Ok(None)
@@ -366,9 +376,9 @@ impl<T: Read> StreamDecoder<T> {
 	}
 }
 
-/// An event encountered while decoding CBOR.
+/// An event encountered while decoding or encoding CBOR using a streaming basic implementation.
 #[derive(Debug, Clone)]
-pub enum StreamEvent {
+pub enum Event {
 	/// An unsigned integer.
 	Unsigned(u64),
 	/// A signed integer in a slightly odd representation.
@@ -417,8 +427,8 @@ pub enum StreamEvent {
 	Break,
 }
 
-impl StreamEvent {
-	/// Interpret a [`StreamEvent::Signed`] value.
+impl Event {
+	/// Interpret a [`Event::Signed`] value.
 	///
 	/// # Overflow behavior
 	///
@@ -428,7 +438,7 @@ impl StreamEvent {
 		-1 - (val as i64)
 	}
 
-	/// Interpret a [`StreamEvent::Signed`] value.
+	/// Interpret a [`Event::Signed`] value.
 	///
 	/// # Overflow behavior
 	///
@@ -440,7 +450,7 @@ impl StreamEvent {
 		}
 	}
 
-	/// Interpret a [`StreamEvent::Signed`] value.
+	/// Interpret a [`Event::Signed`] value.
 	///
 	/// # Overflow behavior
 	///
@@ -449,47 +459,47 @@ impl StreamEvent {
 		-1 - (val as i128)
 	}
 
-	/// Create a [`StreamEvent::Signed`] or [`StreamEvent::Unsigned`] value.
-	pub fn create_signed(val: i64) -> StreamEvent {
+	/// Create a [`Event::Signed`] or [`Event::Unsigned`] value.
+	pub fn create_signed(val: i64) -> Event {
 		if val.is_negative() {
-			StreamEvent::Signed(val.abs_diff(-1))
+			Event::Signed(val.abs_diff(-1))
 		} else {
-			StreamEvent::Unsigned(val as _)
+			Event::Unsigned(val as _)
 		}
 	}
 
-	/// Create a [`StreamEvent::Signed`] or [`StreamEvent::Unsigned`] value.
+	/// Create a [`Event::Signed`] or [`Event::Unsigned`] value.
 	///
 	/// Because this takes an [`i128`], it can express all the numbers CBOR can encode.
 	/// However, some [`i128`]s cannot be encoded in basic CBOR integers.
 	/// In this case, it will return [`None`].
-	pub fn create_signed_wide(val: i128) -> Option<StreamEvent> {
+	pub fn create_signed_wide(val: i128) -> Option<Event> {
 		if val.is_negative() {
 			match val.abs_diff(-1).try_into() {
-				Ok(val) => Some(StreamEvent::Signed(val)),
+				Ok(val) => Some(Event::Signed(val)),
 				Err(_) => None,
 			}
 		} else {
-			Some(StreamEvent::Unsigned(val as _))
+			Some(Event::Unsigned(val as _))
 		}
 	}
 }
 
-/// A streaming CBOR encoder.
-pub struct StreamEncoder<T: Write> {
+/// A streaming encoder for the CBOR basic data model.
+pub struct Encoder<T: Write> {
 	dest: T,
 	pending: Vec<Pending>,
 }
 
-impl<T: Write> StreamEncoder<T> {
+impl<T: Write> Encoder<T> {
 	pub fn new(dest: T) -> Self {
-		StreamEncoder {
+		Encoder {
 			dest,
 			pending: Vec::new(),
 		}
 	}
 
-	pub fn feed_event(&mut self, event: StreamEvent) -> Result<(), EncodeError> {
+	pub fn feed_event(&mut self, event: Event) -> Result<(), EncodeError> {
 		macro_rules! write_initial_and_argument {
 			($major:expr, $argument:expr) => {
 				let major: u8 = $major << 5;
@@ -545,49 +555,49 @@ impl<T: Write> StreamEncoder<T> {
 		}
 
 		match event {
-			StreamEvent::Unsigned(n) => {
+			Event::Unsigned(n) => {
 				write_initial_and_argument!(0, n);
 			}
-			StreamEvent::Signed(n) => {
+			Event::Signed(n) => {
 				write_initial_and_argument!(1, n);
 			}
-			StreamEvent::ByteString(bytes) => {
+			Event::ByteString(bytes) => {
 				write_initial_and_argument!(2, bytes.len() as _);
 				self.dest.write_all(&bytes)?;
 			}
-			StreamEvent::UnknownLengthByteString => {
+			Event::UnknownLengthByteString => {
 				self.dest.write_all(&[0x5F])?;
 				self.pending.push(Pending::Break);
 			}
-			StreamEvent::TextString(text) => {
+			Event::TextString(text) => {
 				write_initial_and_argument!(3, text.len() as _);
 				self.dest.write_all(text.as_bytes())?;
 			}
-			StreamEvent::UnknownLengthTextString => {
+			Event::UnknownLengthTextString => {
 				self.dest.write_all(&[0x7F])?;
 				self.pending.push(Pending::Break);
 			}
-			StreamEvent::Array(n) => {
+			Event::Array(n) => {
 				write_initial_and_argument!(4, n);
 				self.pending.push(Pending::Array(n));
 			}
-			StreamEvent::UnknownLengthArray => {
+			Event::UnknownLengthArray => {
 				self.dest.write_all(&[0x9F])?;
 				self.pending.push(Pending::Break);
 			}
-			StreamEvent::Map(n) => {
+			Event::Map(n) => {
 				write_initial_and_argument!(5, n);
 				self.pending.push(Pending::Map(n, true));
 			}
-			StreamEvent::UnknownLengthMap => {
+			Event::UnknownLengthMap => {
 				self.dest.write_all(&[0xBF])?;
 				self.pending.push(Pending::UnknownLengthMap(true));
 			}
-			StreamEvent::Tag(n) => {
+			Event::Tag(n) => {
 				write_initial_and_argument!(6, n);
 				self.pending.push(Pending::Tag);
 			}
-			StreamEvent::Float(n64) => {
+			Event::Float(n64) => {
 				let n32 = n64 as f32;
 				if n32 as f64 == n64 {
 					let n16 = half::f16::from_f64(n64);
@@ -603,7 +613,7 @@ impl<T: Write> StreamEncoder<T> {
 					self.dest.write_all(&n64.to_be_bytes())?;
 				}
 			}
-			StreamEvent::Simple(n) => {
+			Event::Simple(n) => {
 				// The CBOR spec requires that simple values 0-24 be encoded as a single byte,
 				// and simple values 25-255 be encoded as two bytes.
 				// Why this is required when overlong arguments are otherwise legal is a mystery to me,
@@ -613,7 +623,7 @@ impl<T: Write> StreamEncoder<T> {
 				write_initial_and_argument!(7, n as _);
 				// and not worry about accidentally generating the prefix to a float.
 			}
-			StreamEvent::Break => match self.pending.pop() {
+			Event::Break => match self.pending.pop() {
 				Some(Pending::Break | Pending::UnknownLengthMap(false)) => {
 					self.dest.write_all(&[0xFF])?
 				}
@@ -627,6 +637,20 @@ impl<T: Write> StreamEncoder<T> {
 	pub fn ready_to_finish(&self) -> bool {
 		self.pending.is_empty()
 	}
+}
+
+// Errors that can occur when encoding CBOR using [`Encoder`].
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum EncodeError {
+	#[error("excess data")]
+	Excess,
+	#[error("insufficient data")]
+	Insufficient,
+	#[error("{0}")]
+	IoError(#[from] std::io::Error),
+	#[error("break at invalid time")]
+	InvalidBreak,
 }
 
 #[cfg(test)]
@@ -654,7 +678,7 @@ mod test {
 			decode_test!(match $decoder: $out if true);
 		};
 		($in:expr => $out:pat if $cond:expr) => {
-			let mut decoder = StreamDecoder::new(Cursor::new($in));
+			let mut decoder = Decoder::new(Cursor::new($in));
 			decode_test!(match decoder: $in => $out if $cond);
 			decoder.finish(false).unwrap();
 		};
@@ -662,7 +686,7 @@ mod test {
 			decode_test!($in => $out if true);
 		};
 		(small $in:expr) => {
-			let mut decoder = StreamDecoder::new(Cursor::new($in));
+			let mut decoder = Decoder::new(Cursor::new($in));
 			decode_test!(match decoder: $in => Err(DecodeError::Insufficient));
 			assert!(!decoder.ready_to_finish(false).unwrap());
 		};
@@ -671,7 +695,7 @@ mod test {
 	macro_rules! encode_test {
 		($($in:expr),+ => $out:expr, check finish if $cond:expr, expecting $expect:expr; $event:ident) => {
 			let mut buf = Vec::new();
-			let mut encoder = StreamEncoder::new(Cursor::new(&mut buf));
+			let mut encoder = Encoder::new(Cursor::new(&mut buf));
 			for (idx, $event) in [$($in),+].into_iter().enumerate() {
 				let check_finish = $cond;
 				let expected = $expect;
@@ -701,20 +725,20 @@ mod test {
 	#[test]
 	fn decode_uint_tiny() {
 		for i1 in 0..=0x17u8 {
-			decode_test!([i1] => Ok(StreamEvent::Unsigned(i2)) if i2 == i1 as _);
+			decode_test!([i1] => Ok(Event::Unsigned(i2)) if i2 == i1 as _);
 		}
 	}
 
 	#[test]
 	fn encode_uint_tiny() {
 		for i in 0..=0x17u8 {
-			encode_test!(StreamEvent::Unsigned(i as _) => [i]);
+			encode_test!(Event::Unsigned(i as _) => [i]);
 		}
 	}
 
 	#[test]
 	fn decode_uint_8bit() {
-		decode_test!([0x18u8, 0x01] => Ok(StreamEvent::Unsigned(0x01)));
+		decode_test!([0x18u8, 0x01] => Ok(Event::Unsigned(0x01)));
 	}
 
 	#[test]
@@ -724,12 +748,12 @@ mod test {
 
 	#[test]
 	fn encode_uint_8bit() {
-		encode_test!(StreamEvent::Unsigned(0x3F) => [0x18, 0x3F]);
+		encode_test!(Event::Unsigned(0x3F) => [0x18, 0x3F]);
 	}
 
 	#[test]
 	fn decode_uint_16bit() {
-		decode_test!([0x19u8, 0x01, 0x02] => Ok(StreamEvent::Unsigned(0x0102)));
+		decode_test!([0x19u8, 0x01, 0x02] => Ok(Event::Unsigned(0x0102)));
 	}
 
 	#[test]
@@ -739,12 +763,12 @@ mod test {
 
 	#[test]
 	fn encode_uint_16bit() {
-		encode_test!(StreamEvent::Unsigned(0x1234) => [0x19, 0x12, 0x34]);
+		encode_test!(Event::Unsigned(0x1234) => [0x19, 0x12, 0x34]);
 	}
 
 	#[test]
 	fn decode_uint_32bit() {
-		decode_test!([0x1Au8, 0x01, 0x02, 0x03, 0x04] => Ok(StreamEvent::Unsigned(0x01020304)));
+		decode_test!([0x1Au8, 0x01, 0x02, 0x03, 0x04] => Ok(Event::Unsigned(0x01020304)));
 	}
 
 	#[test]
@@ -754,12 +778,12 @@ mod test {
 
 	#[test]
 	fn encode_uint_32bit() {
-		encode_test!(StreamEvent::Unsigned(0x12345678) => [0x1A, 0x12, 0x34, 0x56, 0x78]);
+		encode_test!(Event::Unsigned(0x12345678) => [0x1A, 0x12, 0x34, 0x56, 0x78]);
 	}
 
 	#[test]
 	fn decode_uint_64bit() {
-		decode_test!([0x1Bu8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08] => Ok(StreamEvent::Unsigned(0x0102030405060708)));
+		decode_test!([0x1Bu8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08] => Ok(Event::Unsigned(0x0102030405060708)));
 	}
 
 	#[test]
@@ -769,76 +793,64 @@ mod test {
 
 	#[test]
 	fn encode_uint_64bit() {
-		encode_test!(StreamEvent::Unsigned(0x123456789ABCDEF0) => [0x1B, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0]);
+		encode_test!(Event::Unsigned(0x123456789ABCDEF0) => [0x1B, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0]);
 	}
 
 	#[test]
 	fn decode_negint() {
-		decode_test!([0x20u8] => Ok(StreamEvent::Signed(0)));
-		decode_test!([0x37u8] => Ok(StreamEvent::Signed(0x17)));
-		decode_test!([0x38, 0x01] => Ok(StreamEvent::Signed(0x01)));
-		decode_test!([0x39, 0x01, 0x02] => Ok(StreamEvent::Signed(0x0102)));
-		decode_test!([0x3A, 0x01, 0x02, 0x03, 0x04] => Ok(StreamEvent::Signed(0x01020304)));
-		decode_test!([0x3B, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08] => Ok(StreamEvent::Signed(0x0102030405060708)));
+		decode_test!([0x20u8] => Ok(Event::Signed(0)));
+		decode_test!([0x37u8] => Ok(Event::Signed(0x17)));
+		decode_test!([0x38, 0x01] => Ok(Event::Signed(0x01)));
+		decode_test!([0x39, 0x01, 0x02] => Ok(Event::Signed(0x0102)));
+		decode_test!([0x3A, 0x01, 0x02, 0x03, 0x04] => Ok(Event::Signed(0x01020304)));
+		decode_test!([0x3B, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08] => Ok(Event::Signed(0x0102030405060708)));
 		decode_test!(small b"\x3B\x00\x00\x00\x00\x00\x00\x00");
 	}
 
 	#[test]
 	fn encode_negint() {
-		encode_test!(StreamEvent::Signed(0) => [0x20]);
-		encode_test!(StreamEvent::Signed(0x17) => [0x37]);
-		encode_test!(StreamEvent::Signed(0xAA) => [0x38, 0xAA]);
-		encode_test!(StreamEvent::Signed(0x0102) => [0x39, 0x01, 0x02]);
-		encode_test!(StreamEvent::Signed(0x01020304) => [0x3A, 0x01, 0x02, 0x03, 0x04]);
-		encode_test!(StreamEvent::Signed(0x010203040506) => [0x3B, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
+		encode_test!(Event::Signed(0) => [0x20]);
+		encode_test!(Event::Signed(0x17) => [0x37]);
+		encode_test!(Event::Signed(0xAA) => [0x38, 0xAA]);
+		encode_test!(Event::Signed(0x0102) => [0x39, 0x01, 0x02]);
+		encode_test!(Event::Signed(0x01020304) => [0x3A, 0x01, 0x02, 0x03, 0x04]);
+		encode_test!(Event::Signed(0x010203040506) => [0x3B, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
 	}
 
 	#[test]
 	fn interpret_signed() {
-		assert_eq!(StreamEvent::interpret_signed(0), -1);
-		assert_eq!(StreamEvent::interpret_signed_checked(0), Some(-1));
-		assert_eq!(StreamEvent::interpret_signed_checked(u64::MAX), None);
-		assert_eq!(StreamEvent::interpret_signed_wide(0), -1);
+		assert_eq!(Event::interpret_signed(0), -1);
+		assert_eq!(Event::interpret_signed_checked(0), Some(-1));
+		assert_eq!(Event::interpret_signed_checked(u64::MAX), None);
+		assert_eq!(Event::interpret_signed_wide(0), -1);
 		assert_eq!(
-			StreamEvent::interpret_signed_wide(u64::MAX),
+			Event::interpret_signed_wide(u64::MAX),
 			-1 - u64::MAX as i128
 		);
 	}
 
 	#[test]
 	fn create_signed() {
-		assert!(matches!(
-			StreamEvent::create_signed(0),
-			StreamEvent::Unsigned(0)
-		));
-		assert!(matches!(
-			StreamEvent::create_signed(22),
-			StreamEvent::Unsigned(22)
-		));
-		assert!(matches!(
-			StreamEvent::create_signed(-1),
-			StreamEvent::Signed(0)
-		));
-		assert!(matches!(
-			StreamEvent::create_signed(-22),
-			StreamEvent::Signed(21)
-		));
+		assert!(matches!(Event::create_signed(0), Event::Unsigned(0)));
+		assert!(matches!(Event::create_signed(22), Event::Unsigned(22)));
+		assert!(matches!(Event::create_signed(-1), Event::Signed(0)));
+		assert!(matches!(Event::create_signed(-22), Event::Signed(21)));
 	}
 
 	#[test]
 	fn decode_bytes() {
-		decode_test!([0x40] => Ok(StreamEvent::ByteString(x)) if x == b"");
-		decode_test!(b"\x45Hello" => Ok(StreamEvent::ByteString(x)) if x == b"Hello");
-		decode_test!(b"\x58\x04Halo" => Ok(StreamEvent::ByteString(x)) if x == b"Halo");
-		decode_test!(b"\x59\x00\x07Goodbye" => Ok(StreamEvent::ByteString(x)) if x == b"Goodbye");
-		decode_test!(b"\x5A\x00\x00\x00\x0DLong message!" => Ok(StreamEvent::ByteString(x)) if x == b"Long message!");
-		decode_test!(b"\x5B\x00\x00\x00\x00\x00\x00\x00\x01?" => Ok(StreamEvent::ByteString(x)) if x == b"?");
+		decode_test!([0x40] => Ok(Event::ByteString(x)) if x == b"");
+		decode_test!(b"\x45Hello" => Ok(Event::ByteString(x)) if x == b"Hello");
+		decode_test!(b"\x58\x04Halo" => Ok(Event::ByteString(x)) if x == b"Halo");
+		decode_test!(b"\x59\x00\x07Goodbye" => Ok(Event::ByteString(x)) if x == b"Goodbye");
+		decode_test!(b"\x5A\x00\x00\x00\x0DLong message!" => Ok(Event::ByteString(x)) if x == b"Long message!");
+		decode_test!(b"\x5B\x00\x00\x00\x00\x00\x00\x00\x01?" => Ok(Event::ByteString(x)) if x == b"?");
 	}
 
 	#[test]
 	fn encode_bytes() {
-		encode_test!(StreamEvent::ByteString(b"".to_vec()) => b"\x40");
-		encode_test!(StreamEvent::ByteString(b"abcd".to_vec()) => b"\x44abcd");
+		encode_test!(Event::ByteString(b"".to_vec()) => b"\x40");
+		encode_test!(Event::ByteString(b"abcd".to_vec()) => b"\x44abcd");
 
 		macro_rules! test {
 			($size:expr, $prefix:expr) => {
@@ -850,9 +862,9 @@ mod test {
 					it
 				};
 				let mut output = Vec::with_capacity(size + prefix.len());
-				let mut encoder = StreamEncoder::new(Cursor::new(&mut output));
+				let mut encoder = Encoder::new(Cursor::new(&mut output));
 				encoder
-					.feed_event(StreamEvent::ByteString(input.clone()))
+					.feed_event(Event::ByteString(input.clone()))
 					.unwrap();
 				assert_eq!(output[..prefix.len()], prefix);
 				assert_eq!(output[prefix.len()..], input);
@@ -871,22 +883,22 @@ mod test {
 
 	#[test]
 	fn decode_bytes_segmented() {
-		let mut decoder = StreamDecoder::new(Cursor::new(b"\x5F\x44abcd\x43efg\xFF"));
-		decode_test!(match decoder: Ok(StreamEvent::UnknownLengthByteString));
+		let mut decoder = Decoder::new(Cursor::new(b"\x5F\x44abcd\x43efg\xFF"));
+		decode_test!(match decoder: Ok(Event::UnknownLengthByteString));
 		assert!(!decoder.ready_to_finish(false).unwrap());
-		decode_test!(match decoder: Ok(StreamEvent::ByteString(x)) if x == b"abcd");
+		decode_test!(match decoder: Ok(Event::ByteString(x)) if x == b"abcd");
 		assert!(!decoder.ready_to_finish(false).unwrap());
-		decode_test!(match decoder: Ok(StreamEvent::ByteString(x)) if x == b"efg");
+		decode_test!(match decoder: Ok(Event::ByteString(x)) if x == b"efg");
 		assert!(!decoder.ready_to_finish(false).unwrap());
-		decode_test!(match decoder: Ok(StreamEvent::Break));
+		decode_test!(match decoder: Ok(Event::Break));
 		assert!(decoder.ready_to_finish(false).unwrap());
 	}
 
 	#[test]
 	fn decode_bytes_segmented_small() {
-		let mut decoder = StreamDecoder::new(Cursor::new(b"\x5F\x44abcd"));
-		decode_test!(match decoder: Ok(StreamEvent::UnknownLengthByteString));
-		decode_test!(match decoder: Ok(StreamEvent::ByteString(x)) if x == b"abcd");
+		let mut decoder = Decoder::new(Cursor::new(b"\x5F\x44abcd"));
+		decode_test!(match decoder: Ok(Event::UnknownLengthByteString));
+		decode_test!(match decoder: Ok(Event::ByteString(x)) if x == b"abcd");
 		decode_test!(match decoder: Err(DecodeError::Insufficient));
 		assert!(!decoder.ready_to_finish(false).unwrap());
 	}
@@ -894,23 +906,23 @@ mod test {
 	#[test]
 	fn encode_bytes_segmented() {
 		encode_test!(
-			StreamEvent::UnknownLengthByteString,
-			StreamEvent::ByteString(b"abcd".to_vec()),
-			StreamEvent::ByteString(b"efg".to_vec()),
-			StreamEvent::Break
+			Event::UnknownLengthByteString,
+			Event::ByteString(b"abcd".to_vec()),
+			Event::ByteString(b"efg".to_vec()),
+			Event::Break
 			=> b"\x5F\x44abcd\x43efg\xFF",
-			check finish expecting matches!(event, StreamEvent::Break); event
+			check finish expecting matches!(event, Event::Break); event
 		);
 	}
 
 	#[test]
 	fn decode_text() {
-		decode_test!([0x60] => Ok(StreamEvent::TextString(x)) if x == "");
-		decode_test!(b"\x65Hello" => Ok(StreamEvent::TextString(x)) if x == "Hello");
-		decode_test!(b"\x78\x04Halo" => Ok(StreamEvent::TextString(x)) if x == "Halo");
-		decode_test!(b"\x79\x00\x07Goodbye" => Ok(StreamEvent::TextString(x)) if x == "Goodbye");
-		decode_test!(b"\x7A\x00\x00\x00\x0DLong message!" => Ok(StreamEvent::TextString(x)) if x == "Long message!");
-		decode_test!(b"\x7B\x00\x00\x00\x00\x00\x00\x00\x01?" => Ok(StreamEvent::TextString(x)) if x == "?");
+		decode_test!([0x60] => Ok(Event::TextString(x)) if x == "");
+		decode_test!(b"\x65Hello" => Ok(Event::TextString(x)) if x == "Hello");
+		decode_test!(b"\x78\x04Halo" => Ok(Event::TextString(x)) if x == "Halo");
+		decode_test!(b"\x79\x00\x07Goodbye" => Ok(Event::TextString(x)) if x == "Goodbye");
+		decode_test!(b"\x7A\x00\x00\x00\x0DLong message!" => Ok(Event::TextString(x)) if x == "Long message!");
+		decode_test!(b"\x7B\x00\x00\x00\x00\x00\x00\x00\x01?" => Ok(Event::TextString(x)) if x == "?");
 	}
 
 	#[test]
@@ -921,8 +933,8 @@ mod test {
 
 	#[test]
 	fn encode_text() {
-		encode_test!(StreamEvent::TextString("".to_string()) => b"\x60");
-		encode_test!(StreamEvent::TextString("abcd".to_string()) => b"\x64abcd");
+		encode_test!(Event::TextString("".to_string()) => b"\x60");
+		encode_test!(Event::TextString("abcd".to_string()) => b"\x64abcd");
 
 		macro_rules! test {
 			($size:expr, $prefix:expr) => {
@@ -934,9 +946,9 @@ mod test {
 					unsafe { String::from_utf8_unchecked(it) }
 				};
 				let mut output = Vec::with_capacity(size + prefix.len());
-				let mut encoder = StreamEncoder::new(Cursor::new(&mut output));
+				let mut encoder = Encoder::new(Cursor::new(&mut output));
 				encoder
-					.feed_event(StreamEvent::TextString(input.clone()))
+					.feed_event(Event::TextString(input.clone()))
 					.unwrap();
 				assert_eq!(output[..prefix.len()], prefix);
 				assert_eq!(output[prefix.len()..], input.into_bytes());
@@ -955,29 +967,29 @@ mod test {
 
 	#[test]
 	fn decode_text_segmented() {
-		let mut decoder = StreamDecoder::new(Cursor::new(b"\x7F\x64abcd\x63efg\xFF"));
-		decode_test!(match decoder: Ok(StreamEvent::UnknownLengthTextString));
+		let mut decoder = Decoder::new(Cursor::new(b"\x7F\x64abcd\x63efg\xFF"));
+		decode_test!(match decoder: Ok(Event::UnknownLengthTextString));
 		assert!(!decoder.ready_to_finish(false).unwrap());
-		decode_test!(match decoder: Ok(StreamEvent::TextString(x)) if x == "abcd");
+		decode_test!(match decoder: Ok(Event::TextString(x)) if x == "abcd");
 		assert!(!decoder.ready_to_finish(false).unwrap());
-		decode_test!(match decoder: Ok(StreamEvent::TextString(x)) if x == "efg");
+		decode_test!(match decoder: Ok(Event::TextString(x)) if x == "efg");
 		assert!(!decoder.ready_to_finish(false).unwrap());
-		decode_test!(match decoder: Ok(StreamEvent::Break));
+		decode_test!(match decoder: Ok(Event::Break));
 		assert!(decoder.ready_to_finish(false).unwrap());
 	}
 
 	#[test]
 	fn decode_text_segmented_small() {
-		let mut decoder = StreamDecoder::new(Cursor::new(b"\x7F\x64abcd"));
-		decode_test!(match decoder: Ok(StreamEvent::UnknownLengthTextString));
-		decode_test!(match decoder: Ok(StreamEvent::TextString(x)) if x == "abcd");
+		let mut decoder = Decoder::new(Cursor::new(b"\x7F\x64abcd"));
+		decode_test!(match decoder: Ok(Event::UnknownLengthTextString));
+		decode_test!(match decoder: Ok(Event::TextString(x)) if x == "abcd");
 		decode_test!(match decoder: Err(DecodeError::Insufficient));
 		assert!(!decoder.ready_to_finish(false).unwrap());
 	}
 
 	#[test]
 	fn decode_text_invalid() {
-		let mut decoder = StreamDecoder::new(Cursor::new(b"\x62\xFF\xFF"));
+		let mut decoder = Decoder::new(Cursor::new(b"\x62\xFF\xFF"));
 		match decoder.next_event() {
 			Err(DecodeError::InvalidUtf8(_)) => (),
 			_ => panic!("accepted invalid UTF-8"),
@@ -987,19 +999,19 @@ mod test {
 	#[test]
 	fn encode_text_segmented() {
 		encode_test!(
-			StreamEvent::UnknownLengthTextString,
-			StreamEvent::TextString("abcd".to_string()),
-			StreamEvent::TextString("efg".to_string()),
-			StreamEvent::Break
+			Event::UnknownLengthTextString,
+			Event::TextString("abcd".to_string()),
+			Event::TextString("efg".to_string()),
+			Event::Break
 			=> b"\x7F\x64abcd\x63efg\xFF",
-			check finish expecting matches!(event, StreamEvent::Break); event
+			check finish expecting matches!(event, Event::Break); event
 		);
 	}
 
 	#[test]
 	fn decode_array() {
-		let mut decoder = StreamDecoder::new(Cursor::new(b"\x84\0\x01\x02\x03"));
-		decode_test!(match decoder: Ok(StreamEvent::Array(4)));
+		let mut decoder = Decoder::new(Cursor::new(b"\x84\0\x01\x02\x03"));
+		decode_test!(match decoder: Ok(Event::Array(4)));
 		assert!(!decoder.ready_to_finish(false).unwrap());
 		decode_test!(match decoder: Ok(_));
 		assert!(!decoder.ready_to_finish(false).unwrap());
@@ -1010,27 +1022,27 @@ mod test {
 		decode_test!(match decoder: Ok(_));
 		assert!(decoder.ready_to_finish(false).unwrap());
 
-		let mut decoder = StreamDecoder::new(Cursor::new(b"\x80"));
-		decode_test!(match decoder: Ok(StreamEvent::Array(0)));
+		let mut decoder = Decoder::new(Cursor::new(b"\x80"));
+		decode_test!(match decoder: Ok(Event::Array(0)));
 		assert!(decoder.ready_to_finish(false).unwrap());
 	}
 
 	#[test]
 	fn encode_array() {
 		encode_test!(
-			StreamEvent::Array(3),
-			StreamEvent::Unsigned(1),
-			StreamEvent::Unsigned(2),
-			StreamEvent::Unsigned(3)
+			Event::Array(3),
+			Event::Unsigned(1),
+			Event::Unsigned(2),
+			Event::Unsigned(3)
 			=> b"\x83\x01\x02\x03",
-			check finish expecting matches!(event, StreamEvent::Unsigned(3)); event
+			check finish expecting matches!(event, Event::Unsigned(3)); event
 		);
 	}
 
 	#[test]
 	fn decode_array_segmented() {
-		let mut decoder = StreamDecoder::new(Cursor::new(b"\x9F\x00\x00\x00\xFF"));
-		decode_test!(match decoder: Ok(StreamEvent::UnknownLengthArray));
+		let mut decoder = Decoder::new(Cursor::new(b"\x9F\x00\x00\x00\xFF"));
+		decode_test!(match decoder: Ok(Event::UnknownLengthArray));
 		assert!(!decoder.ready_to_finish(false).unwrap());
 		decode_test!(match decoder: Ok(_));
 		assert!(!decoder.ready_to_finish(false).unwrap());
@@ -1038,27 +1050,27 @@ mod test {
 		assert!(!decoder.ready_to_finish(false).unwrap());
 		decode_test!(match decoder: Ok(_));
 		assert!(!decoder.ready_to_finish(false).unwrap());
-		decode_test!(match decoder: Ok(StreamEvent::Break));
+		decode_test!(match decoder: Ok(Event::Break));
 		assert!(decoder.ready_to_finish(false).unwrap());
 	}
 
 	#[test]
 	fn encode_array_segmented() {
 		encode_test!(
-			StreamEvent::UnknownLengthArray,
-			StreamEvent::Unsigned(1),
-			StreamEvent::Unsigned(2),
-			StreamEvent::Unsigned(3),
-			StreamEvent::Break
+			Event::UnknownLengthArray,
+			Event::Unsigned(1),
+			Event::Unsigned(2),
+			Event::Unsigned(3),
+			Event::Break
 			=> b"\x9F\x01\x02\x03\xFF",
-			check finish expecting matches!(event, StreamEvent::Break); event
+			check finish expecting matches!(event, Event::Break); event
 		);
 	}
 
 	#[test]
 	fn decode_map() {
-		let mut decoder = StreamDecoder::new(Cursor::new(b"\xA2\x01\x02\x03\x04"));
-		decode_test!(match decoder: Ok(StreamEvent::Map(2)));
+		let mut decoder = Decoder::new(Cursor::new(b"\xA2\x01\x02\x03\x04"));
+		decode_test!(match decoder: Ok(Event::Map(2)));
 		assert!(!decoder.ready_to_finish(false).unwrap());
 		decode_test!(match decoder: Ok(_));
 		assert!(!decoder.ready_to_finish(false).unwrap());
@@ -1069,28 +1081,28 @@ mod test {
 		decode_test!(match decoder: Ok(_));
 		assert!(decoder.ready_to_finish(false).unwrap());
 
-		let mut decoder = StreamDecoder::new(Cursor::new(b"\xA0"));
-		decode_test!(match decoder: Ok(StreamEvent::Map(0)));
+		let mut decoder = Decoder::new(Cursor::new(b"\xA0"));
+		decode_test!(match decoder: Ok(Event::Map(0)));
 		assert!(decoder.ready_to_finish(false).unwrap());
 	}
 
 	#[test]
 	fn encode_map() {
 		encode_test!(
-			StreamEvent::Map(2),
-			StreamEvent::Unsigned(0),
-			StreamEvent::TextString("a".to_string()),
-			StreamEvent::Unsigned(1),
-			StreamEvent::TextString("b".to_string())
+			Event::Map(2),
+			Event::Unsigned(0),
+			Event::TextString("a".to_string()),
+			Event::Unsigned(1),
+			Event::TextString("b".to_string())
 			=> b"\xA2\x00\x61a\x01\x61b",
-			check finish expecting matches!(event, StreamEvent::TextString(ref s) if s == "b"); event
+			check finish expecting matches!(event, Event::TextString(ref s) if s == "b"); event
 		);
 	}
 
 	#[test]
 	fn decode_map_segmented() {
-		let mut decoder = StreamDecoder::new(Cursor::new(b"\xBF\x00\x00\x00\x00\xFF"));
-		decode_test!(match decoder: Ok(StreamEvent::UnknownLengthMap));
+		let mut decoder = Decoder::new(Cursor::new(b"\xBF\x00\x00\x00\x00\xFF"));
+		decode_test!(match decoder: Ok(Event::UnknownLengthMap));
 		assert!(!decoder.ready_to_finish(false).unwrap());
 		decode_test!(match decoder: Ok(_));
 		assert!(!decoder.ready_to_finish(false).unwrap());
@@ -1100,37 +1112,37 @@ mod test {
 		assert!(!decoder.ready_to_finish(false).unwrap());
 		decode_test!(match decoder: Ok(_));
 		assert!(!decoder.ready_to_finish(false).unwrap());
-		decode_test!(match decoder: Ok(StreamEvent::Break));
+		decode_test!(match decoder: Ok(Event::Break));
 		assert!(decoder.ready_to_finish(false).unwrap());
 	}
 
 	#[test]
 	fn encode_map_segmented() {
 		encode_test!(
-			StreamEvent::UnknownLengthMap,
-			StreamEvent::Unsigned(0),
-			StreamEvent::TextString("a".to_string()),
-			StreamEvent::Unsigned(1),
-			StreamEvent::TextString("b".to_string()),
-			StreamEvent::Break
+			Event::UnknownLengthMap,
+			Event::Unsigned(0),
+			Event::TextString("a".to_string()),
+			Event::Unsigned(1),
+			Event::TextString("b".to_string()),
+			Event::Break
 			=> b"\xBF\x00\x61a\x01\x61b\xFF",
-			check finish expecting matches!(event, StreamEvent::Break); event
+			check finish expecting matches!(event, Event::Break); event
 		);
 	}
 
 	// TODO: Remove this test in favor of adding `check finish` features to decode_test!.
 	#[test]
 	fn decode_map_segmented_odd() {
-		let mut decoder = StreamDecoder::new(Cursor::new(b"\xBF\x00\xFF"));
-		decode_test!(match decoder: Ok(StreamEvent::UnknownLengthMap));
+		let mut decoder = Decoder::new(Cursor::new(b"\xBF\x00\xFF"));
+		decode_test!(match decoder: Ok(Event::UnknownLengthMap));
 		decode_test!(match decoder: Ok(_));
 		assert!(!decoder.ready_to_finish(false).unwrap());
 	}
 
 	#[test]
 	fn decode_tag() {
-		let mut decoder = StreamDecoder::new(Cursor::new(b"\xC1\x00"));
-		decode_test!(match decoder: Ok(StreamEvent::Tag(1)));
+		let mut decoder = Decoder::new(Cursor::new(b"\xC1\x00"));
+		decode_test!(match decoder: Ok(Event::Tag(1)));
 		assert!(!decoder.ready_to_finish(false).unwrap());
 		decode_test!(match decoder: Ok(_));
 		assert!(decoder.ready_to_finish(false).unwrap());
@@ -1139,68 +1151,68 @@ mod test {
 	#[test]
 	fn encode_tag() {
 		encode_test!(
-			StreamEvent::Tag(1),
-			StreamEvent::Unsigned(0)
+			Event::Tag(1),
+			Event::Unsigned(0)
 			=> b"\xC1\x00",
-			check finish expecting matches!(event, StreamEvent::Unsigned(_)); event
+			check finish expecting matches!(event, Event::Unsigned(_)); event
 		);
 	}
 
 	#[test]
 	fn decode_simple_tiny() {
 		for n in 0..=23 {
-			decode_test!([0xE0 | n] => Ok(StreamEvent::Simple(x)) if x == n);
+			decode_test!([0xE0 | n] => Ok(Event::Simple(x)) if x == n);
 		}
 	}
 
 	#[test]
 	fn encode_simple_tiny() {
 		for n in 0..=23 {
-			encode_test!(StreamEvent::Simple(n) => [0xE0 | n]);
+			encode_test!(Event::Simple(n) => [0xE0 | n]);
 		}
 	}
 
 	#[test]
 	fn decode_simple_8bit() {
 		for n in 24..=255 {
-			decode_test!([0xF8, n] => Ok(StreamEvent::Simple(x)) if x == n);
+			decode_test!([0xF8, n] => Ok(Event::Simple(x)) if x == n);
 		}
 	}
 
 	#[test]
 	fn encode_simple_8bit() {
 		for n in 24..=255 {
-			encode_test!(StreamEvent::Simple(n) => [0xF8, n]);
+			encode_test!(Event::Simple(n) => [0xF8, n]);
 		}
 	}
 
 	#[test]
 	fn decode_float_64bit() {
-		decode_test!(b"\xFB\x7F\xF0\x00\x00\x00\x00\x00\x00" => Ok(StreamEvent::Float(n)) if n == f64::INFINITY);
+		decode_test!(b"\xFB\x7F\xF0\x00\x00\x00\x00\x00\x00" => Ok(Event::Float(n)) if n == f64::INFINITY);
 	}
 
 	#[test]
 	fn encode_float_64bit() {
-		encode_test!(StreamEvent::Float(1.0000000000000002f64) => b"\xFB\x3F\xF0\x00\x00\x00\x00\x00\x01");
+		encode_test!(Event::Float(1.0000000000000002f64) => b"\xFB\x3F\xF0\x00\x00\x00\x00\x00\x01");
 	}
 
 	#[test]
 	fn decode_float_32bit() {
-		decode_test!(b"\xFA\x3F\x80\x00\x00" => Ok(StreamEvent::Float(n)) if n == 1.0);
+		decode_test!(b"\xFA\x3F\x80\x00\x00" => Ok(Event::Float(n)) if n == 1.0);
 	}
 
 	#[test]
 	fn encode_float_32bit() {
-		encode_test!(StreamEvent::Float(0.999999940395355225f32 as f64) => b"\xFA\x3F\x7F\xFF\xFF");
+		encode_test!(Event::Float(0.999999940395355225f32 as f64) => b"\xFA\x3F\x7F\xFF\xFF");
 	}
 
 	#[test]
 	fn decode_float_16bit() {
-		decode_test!(b"\xF9\x00\x00" => Ok(StreamEvent::Float(n)) if n == 0.0);
+		decode_test!(b"\xF9\x00\x00" => Ok(Event::Float(n)) if n == 0.0);
 	}
 
 	#[test]
 	fn encode_float_16bit() {
-		encode_test!(StreamEvent::Float(f64::INFINITY) => b"\xF9\x7C\x00");
+		encode_test!(Event::Float(f64::INFINITY) => b"\xF9\x7C\x00");
 	}
 }
