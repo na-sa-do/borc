@@ -639,7 +639,7 @@ impl<T: Write> Encoder<T> {
 	}
 }
 
-// Errors that can occur when encoding CBOR using [`Encoder`].
+/// Errors that can occur when encoding CBOR using [`Encoder`].
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum EncodeError {
