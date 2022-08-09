@@ -1,3 +1,10 @@
+//! A streaming implementation of the CBOR basic data model.
+//! 
+//! This module allows you to parse and generate CBOR very efficiently,
+//! at the expense of being somewhat difficult to actually use.
+//! It models CBOR as a series of [`Event`]s, which are not always full data items.
+//! In this way, it is comparable to SAX in the XML world.
+
 use std::{
 	cell::RefCell,
 	collections::VecDeque,
