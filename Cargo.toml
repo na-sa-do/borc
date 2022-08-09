@@ -2,6 +2,7 @@
 name = "borc"
 version = "0.1.0"
 edition = "2021"
+description = "CBOR done right"
 repository = "https://github.com/na-sa-do/borc"
 license = "MIT OR Apache-2.0"
 keywords = ["cbor"]
