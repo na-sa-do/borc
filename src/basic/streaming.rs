@@ -1,18 +1,17 @@
 //! A streaming implementation of the CBOR basic data model.
-//! 
+//!
 //! This module allows you to parse and generate CBOR very efficiently,
 //! at the expense of being somewhat difficult to actually use.
 //! It models CBOR as a series of [`Event`]s, which are not always full data items.
 //! In this way, it is comparable to SAX in the XML world.
 
+use crate::errors::{DecodeError, EncodeError};
 use std::{
 	cell::RefCell,
 	collections::VecDeque,
 	io::{Read, Write},
 	num::NonZeroUsize,
-	string::FromUtf8Error,
 };
-use thiserror::Error;
 
 fn read_be_u16(input: &[u8]) -> u16 {
 	let mut bytes = [0u8; 2];
@@ -30,22 +29,6 @@ fn read_be_u64(input: &[u8]) -> u64 {
 	let mut bytes = [0u8; 8];
 	bytes.copy_from_slice(&input[..8]);
 	u64::from_be_bytes(bytes)
-}
-
-/// Errors that can occur when decoding CBOR using [`Decoder`].
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum DecodeError {
-	#[error("malformed CBOR")]
-	Malformed,
-	#[error("excess data")]
-	Excess,
-	#[error("insufficient data")]
-	Insufficient,
-	#[error("invalid UTF-8: {0}")]
-	InvalidUtf8(#[from] FromUtf8Error),
-	#[error("{0}")]
-	IoError(#[from] std::io::Error),
 }
 
 /// A streaming decoder for the CBOR basic data model.
@@ -644,20 +627,6 @@ impl<T: Write> Encoder<T> {
 	pub fn ready_to_finish(&self) -> bool {
 		self.pending.is_empty()
 	}
-}
-
-/// Errors that can occur when encoding CBOR using [`Encoder`].
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum EncodeError {
-	#[error("excess data")]
-	Excess,
-	#[error("insufficient data")]
-	Insufficient,
-	#[error("{0}")]
-	IoError(#[from] std::io::Error),
-	#[error("break at invalid time")]
-	InvalidBreak,
 }
 
 #[cfg(test)]
