@@ -4,9 +4,9 @@ borc is an implementation of [CBOR, the Concise Binary Object Representation](ht
 
 ## Status
 
-At the moment, the basic streaming encoder and decoder are implemented. Being stream-based (like SAX), they're a bit clunky to use. I plan to write three further interfaces:
+At the moment, the basic streaming encoder and decoder are implemented. Being stream-based, they're a bit clunky to use. I plan to write three further interfaces:
 
-- a basic tree-based encoder and decoder (like DOM)
+- a basic tree-based encoder and decoder
 - an extended stream-based encoder and decoder, which can handle CBOR tags
 - an extended tree-based encoder and decoder
 
