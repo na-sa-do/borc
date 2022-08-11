@@ -15,6 +15,8 @@ pub enum DecodeError {
 	InvalidUtf8(#[from] FromUtf8Error),
 	#[error("{0}")]
 	IoError(#[from] std::io::Error),
+	#[error("break at invalid time")]
+	InvalidBreak,
 }
 
 /// Errors that can occur when encoding CBOR.

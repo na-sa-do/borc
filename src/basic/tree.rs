@@ -5,7 +5,10 @@
 //! but moderately less performant and with much higher memory requirements.
 //! It is comparable to DOM in the XML world.
 
-use crate::errors::DecodeError;
+use crate::{
+	basic::streaming::{Decoder as StreamingDecoder, Event},
+	errors::DecodeError,
+};
 use std::io::Read;
 
 /// An item in the CBOR basic data model.
@@ -54,7 +57,7 @@ impl Item {
 
 	/// Interpret a [`Item::Signed`] value.
 	///
-	/// This is a convenience alias for [`super::streaming::Event::interpreset_signed_wide`].
+	/// This is a convenience alias for [`super::streaming::Event::interpret_signed_wide`].
 	pub fn interpret_signed_wide(val: u64) -> i128 {
 		super::streaming::Event::interpret_signed_wide(val)
 	}
@@ -83,12 +86,31 @@ impl Item {
 			None => None,
 		}
 	}
+}
+
+/// A tree-building decoder for the CBOR basic data model.
+#[derive(Debug, Clone, Default)]
+pub struct Decoder {}
+
+impl Decoder {
+	pub fn new() -> Self {
+		Default::default()
+	}
 
 	/// Parse some CBOR.
-	pub fn decode(source: impl Read) -> Result<Self, DecodeError> {
-		use super::streaming::{Decoder, Event};
-		let mut decoder = Decoder::new(source);
-		Ok(match decoder.next_event()? {
+	pub fn decode(self, source: impl Read) -> Result<Item, DecodeError> {
+		match self.decode_inner(&mut StreamingDecoder::new(source)) {
+			Ok(Some(item)) => Ok(item),
+			Ok(None) => Err(DecodeError::InvalidBreak),
+			Err(e) => Err(e),
+		}
+	}
+
+	fn decode_inner(
+		&self,
+		decoder: &mut StreamingDecoder<impl Read>,
+	) -> Result<Option<Item>, DecodeError> {
+		Ok(Some(match decoder.next_event()? {
 			Event::Unsigned(val) => Item::Unsigned(val),
 			Event::Signed(val) => Item::Signed(val),
 			Event::ByteString(val) => Item::ByteString(val),
@@ -102,7 +124,7 @@ impl Item {
 			Event::Tag(tag) => todo!(),
 			Event::Simple(val) => Item::Simple(val),
 			Event::Float(val) => Item::Float(val),
-			Event::Break => todo!(),
-		})
+			Event::Break => return Ok(None),
+		}))
 	}
 }
