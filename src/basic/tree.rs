@@ -101,7 +101,7 @@ impl Decoder {
 	pub fn decode(self, source: impl Read) -> Result<Item, DecodeError> {
 		match self.decode_inner(&mut StreamingDecoder::new(source)) {
 			Ok(Some(item)) => Ok(item),
-			Ok(None) => Err(DecodeError::InvalidBreak),
+			Ok(None) => Err(DecodeError::Malformed),
 			Err(e) => Err(e),
 		}
 	}
@@ -157,7 +157,7 @@ impl Decoder {
 			Event::UnknownLengthMap => todo!(),
 			Event::Tag(tag) => match self.decode_inner(decoder) {
 				Ok(Some(value)) => Item::Tag(tag, Box::new(value)),
-				Ok(None) => return Err(DecodeError::InvalidBreak),
+				Ok(None) => return Err(DecodeError::Malformed),
 				Err(e) => return Err(e),
 			},
 			Event::Simple(val) => Item::Simple(val),
