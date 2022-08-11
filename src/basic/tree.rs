@@ -155,7 +155,11 @@ impl Decoder {
 			Event::UnknownLengthArray => todo!(),
 			Event::Map(len) => todo!(),
 			Event::UnknownLengthMap => todo!(),
-			Event::Tag(tag) => todo!(),
+			Event::Tag(tag) => match self.decode_inner(decoder) {
+				Ok(Some(value)) => Item::Tag(tag, Box::new(value)),
+				Ok(None) => return Err(DecodeError::InvalidBreak),
+				Err(e) => return Err(e),
+			},
 			Event::Simple(val) => Item::Simple(val),
 			Event::Float(val) => Item::Float(val),
 			Event::Break => return Ok(None),
@@ -198,5 +202,16 @@ mod test {
 	#[test]
 	fn decode_text_segmented_wrong() {
 		decode_test!(b"\x7F\x00" => Err(DecodeError::Malformed));
+	}
+
+	#[test]
+	fn decode_tag() {
+		decode_test!(b"\xC1\x00" => Ok(Item::Tag(1, sub)) if matches!(*sub, Item::Unsigned(0)));
+	}
+
+	#[test]
+	fn decode_tag_wrong() {
+		decode_test!(b"\xC1" => Err(DecodeError::Insufficient));
+		decode_test!(b"\xC1\xFF" => Err(DecodeError::Malformed));
 	}
 }
