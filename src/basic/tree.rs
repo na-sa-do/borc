@@ -151,7 +151,17 @@ impl Decoder {
 					}
 				}
 			}
-			Event::Array(len) => todo!(),
+			Event::Array(len) => {
+				let mut arr = Vec::with_capacity(len.try_into().unwrap_or(usize::MAX));
+				for i in 0..len {
+					match self.decode_inner(decoder)? {
+						None => return Err(DecodeError::Malformed),
+						Some(item) => arr.push(item),
+					}
+				}
+				assert_eq!(arr.len(), len as _);
+				Item::Array(arr)
+			}
 			Event::UnknownLengthArray => todo!(),
 			Event::Map(len) => todo!(),
 			Event::UnknownLengthMap => todo!(),
@@ -202,6 +212,12 @@ mod test {
 	#[test]
 	fn decode_text_segmented_wrong() {
 		decode_test!(b"\x7F\x00" => Err(DecodeError::Malformed));
+	}
+
+	#[test]
+	fn decode_array() {
+		decode_test!(b"\x80" => Ok(Item::Array(v)) if v.is_empty());
+		decode_test!(b"\x84\x00\x01\x02\x03" => Ok(Item::Array(v)) if v == [0,1,2,3].map(|x| Item::Unsigned(x)));
 	}
 
 	#[test]
