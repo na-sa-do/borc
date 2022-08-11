@@ -114,9 +114,43 @@ impl Decoder {
 			Event::Unsigned(val) => Item::Unsigned(val),
 			Event::Signed(val) => Item::Signed(val),
 			Event::ByteString(val) => Item::ByteString(val),
-			Event::UnknownLengthByteString => todo!(),
+			Event::UnknownLengthByteString => {
+				let mut buffer: Vec<u8>;
+				match decoder.next_event()? {
+					Event::ByteString(b) => buffer = b,
+					Event::Break => buffer = Vec::new(),
+					_ => return Err(DecodeError::Malformed),
+				}
+				loop {
+					match decoder.next_event()? {
+						Event::ByteString(b) => buffer.extend_from_slice(&b),
+						Event::Break => return Ok(Some(Item::ByteString(buffer))),
+						_ => return Err(DecodeError::Malformed),
+					}
+				}
+			}
 			Event::TextString(val) => Item::TextString(val),
-			Event::UnknownLengthTextString => todo!(),
+			Event::UnknownLengthTextString => {
+				let mut buffer: String;
+				match decoder.next_event()? {
+					Event::TextString(b) => buffer = b,
+					Event::Break => buffer = String::new(),
+					_ => return Err(DecodeError::Malformed),
+				}
+				loop {
+					match decoder.next_event()? {
+						Event::TextString(b) => {
+							let mut buffer2 = buffer.into_bytes();
+							buffer2.extend_from_slice(b.as_bytes());
+							// Safe because they were strings just a moment ago.
+							// Concatenating UTF-8 strings always produces valid UTF-8.
+							buffer = unsafe { String::from_utf8_unchecked(buffer2) };
+						}
+						Event::Break => return Ok(Some(Item::TextString(buffer))),
+						_ => return Err(DecodeError::Malformed),
+					}
+				}
+			}
 			Event::Array(len) => todo!(),
 			Event::UnknownLengthArray => todo!(),
 			Event::Map(len) => todo!(),
@@ -126,5 +160,43 @@ impl Decoder {
 			Event::Float(val) => Item::Float(val),
 			Event::Break => return Ok(None),
 		}))
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+
+	macro_rules! decode_test {
+		($in:expr => $out:pat if $guard:expr) => {
+			let input = $in;
+			match Decoder::new().decode(std::io::Cursor::new(&input)) {
+				$out if $guard => (),
+				other => panic!("{:X?} => {:?}", input, other),
+			}
+		};
+		($in:expr => $out:pat) => {
+			decode_test!($in => $out if true);
+		}
+	}
+
+	#[test]
+	fn decode_bytes_segmented() {
+		decode_test!(b"\x5F\x42ab\x42cd\xFF" => Ok(Item::ByteString(b)) if b == b"abcd");
+	}
+
+	#[test]
+	fn decode_bytes_segmented_wrong() {
+		decode_test!(b"\x5F\x00" => Err(DecodeError::Malformed));
+	}
+
+	#[test]
+	fn decode_text_segmented() {
+		decode_test!(b"\x7F\x62ab\x62cd\xFF" => Ok(Item::TextString(t)) if t == "abcd");
+	}
+
+	#[test]
+	fn decode_text_segmented_wrong() {
+		decode_test!(b"\x7F\x00" => Err(DecodeError::Malformed));
 	}
 }
