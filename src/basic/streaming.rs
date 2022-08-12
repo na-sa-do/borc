@@ -330,39 +330,36 @@ impl<T: Read> Decoder<T> {
 
 	/// Check whether it is possible to end the decoding now.
 	///
-	/// This will report that it is not possible to end the decoding if there is excess data and the `ignore_excess` parameter is false.
-	///
-	/// Note that this method needs to read from the buffer in order to determine whether any data remains.
-	/// This is only the case if `ignore_excess` is false.
-	pub fn ready_to_finish(&self, ignore_excess: bool) -> Result<bool, std::io::Error> {
-		if ignore_excess {
-			Ok(self.pending.is_empty())
-		} else {
-			if self.input_buffer.borrow().is_empty() {
-				if let Err(e) = self.extend_input_buffer(1.try_into().unwrap()) {
-					match e {
-						DecodeError::Insufficient => Ok(self.pending.is_empty()),
-						DecodeError::IoError(ioe) => Err(ioe),
-						_ => unreachable!(),
-					}
-				} else {
-					Ok(false)
-				}
-			} else {
-				Ok(false)
-			}
-		}
+	/// If this returns true, it means cutting off the CBOR now results in a complete object, _and_ there is no extra data in the internal buffer.
+	/// There can be extra data in the internal buffer if a partial CBOR event has just been read.
+	pub fn ready_to_finish(&self) -> bool {
+		self.pending.is_empty() && self.input_buffer.borrow().is_empty()
 	}
 
 	/// End the decoding.
 	///
-	/// This will return the [`Decoder`] if there is excess data and the `ignore_excess` parameter is false.
-	pub fn finish(self, ignore_excess: bool) -> Result<Option<Self>, std::io::Error> {
-		if self.ready_to_finish(ignore_excess)? {
-			Ok(None)
+	/// This is [checked](`Self::ready_to_finish`) and will return [`DecodeError::Insufficient`] if the CBOR is incomplete.
+	/// If you've performed the check already, try [`Self::force_finish`].
+	pub fn finish(self) -> Result<T, DecodeError> {
+		if self.ready_to_finish() {
+			Ok(self.source.into_inner())
 		} else {
-			Ok(Some(self))
+			Err(DecodeError::Insufficient)
 		}
+	}
+
+	/// End the decoding, without checking whether the decoder is finished or not.
+	///
+	/// This does not return the original reader,
+	/// but the reader returned behaves as if it were the original reader.
+	/// (The discrepancy is because [`Decoder`] contains an internal buffer.
+	/// Rest assured it behaves as if this buffer were not used.)
+	pub fn force_finish(self) -> impl Read {
+		let mut input_buffer = self.input_buffer.into_inner();
+		let mut new_buffer = Vec::with_capacity(input_buffer.len());
+		new_buffer.extend_from_slice(input_buffer.make_contiguous());
+		let cursor = std::io::Cursor::new(new_buffer);
+		cursor.chain(self.source.into_inner())
 	}
 }
 
@@ -656,7 +653,7 @@ mod test {
 		($in:expr => $out:pat if $cond:expr) => {
 			let mut decoder = Decoder::new(Cursor::new($in));
 			decode_test!(match decoder: $in => $out if $cond);
-			decoder.finish(false).unwrap();
+			decoder.finish().unwrap();
 		};
 		($in:expr => $out:pat) => {
 			decode_test!($in => $out if true);
@@ -664,7 +661,7 @@ mod test {
 		(small $in:expr) => {
 			let mut decoder = Decoder::new(Cursor::new($in));
 			decode_test!(match decoder: $in => Err(DecodeError::Insufficient));
-			assert!(!decoder.ready_to_finish(false).unwrap());
+			assert!(!decoder.ready_to_finish());
 		};
 	}
 
@@ -861,13 +858,13 @@ mod test {
 	fn decode_bytes_segmented() {
 		let mut decoder = Decoder::new(Cursor::new(b"\x5F\x44abcd\x43efg\xFF"));
 		decode_test!(match decoder: Ok(Event::UnknownLengthByteString));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(Event::ByteString(x)) if x == b"abcd");
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(Event::ByteString(x)) if x == b"efg");
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(Event::Break));
-		assert!(decoder.ready_to_finish(false).unwrap());
+		assert!(decoder.ready_to_finish());
 	}
 
 	#[test]
@@ -876,7 +873,7 @@ mod test {
 		decode_test!(match decoder: Ok(Event::UnknownLengthByteString));
 		decode_test!(match decoder: Ok(Event::ByteString(x)) if x == b"abcd");
 		decode_test!(match decoder: Err(DecodeError::Insufficient));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 	}
 
 	#[test]
@@ -945,13 +942,13 @@ mod test {
 	fn decode_text_segmented() {
 		let mut decoder = Decoder::new(Cursor::new(b"\x7F\x64abcd\x63efg\xFF"));
 		decode_test!(match decoder: Ok(Event::UnknownLengthTextString));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(Event::TextString(x)) if x == "abcd");
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(Event::TextString(x)) if x == "efg");
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(Event::Break));
-		assert!(decoder.ready_to_finish(false).unwrap());
+		assert!(decoder.ready_to_finish());
 	}
 
 	#[test]
@@ -960,7 +957,7 @@ mod test {
 		decode_test!(match decoder: Ok(Event::UnknownLengthTextString));
 		decode_test!(match decoder: Ok(Event::TextString(x)) if x == "abcd");
 		decode_test!(match decoder: Err(DecodeError::Insufficient));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 	}
 
 	#[test]
@@ -988,19 +985,19 @@ mod test {
 	fn decode_array() {
 		let mut decoder = Decoder::new(Cursor::new(b"\x84\0\x01\x02\x03"));
 		decode_test!(match decoder: Ok(Event::Array(4)));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(decoder.ready_to_finish(false).unwrap());
+		assert!(decoder.ready_to_finish());
 
 		let mut decoder = Decoder::new(Cursor::new(b"\x80"));
 		decode_test!(match decoder: Ok(Event::Array(0)));
-		assert!(decoder.ready_to_finish(false).unwrap());
+		assert!(decoder.ready_to_finish());
 	}
 
 	#[test]
@@ -1019,15 +1016,15 @@ mod test {
 	fn decode_array_segmented() {
 		let mut decoder = Decoder::new(Cursor::new(b"\x9F\x00\x00\x00\xFF"));
 		decode_test!(match decoder: Ok(Event::UnknownLengthArray));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(Event::Break));
-		assert!(decoder.ready_to_finish(false).unwrap());
+		assert!(decoder.ready_to_finish());
 	}
 
 	#[test]
@@ -1047,19 +1044,19 @@ mod test {
 	fn decode_map() {
 		let mut decoder = Decoder::new(Cursor::new(b"\xA2\x01\x02\x03\x04"));
 		decode_test!(match decoder: Ok(Event::Map(2)));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(decoder.ready_to_finish(false).unwrap());
+		assert!(decoder.ready_to_finish());
 
 		let mut decoder = Decoder::new(Cursor::new(b"\xA0"));
 		decode_test!(match decoder: Ok(Event::Map(0)));
-		assert!(decoder.ready_to_finish(false).unwrap());
+		assert!(decoder.ready_to_finish());
 	}
 
 	#[test]
@@ -1079,17 +1076,17 @@ mod test {
 	fn decode_map_segmented() {
 		let mut decoder = Decoder::new(Cursor::new(b"\xBF\x00\x00\x00\x00\xFF"));
 		decode_test!(match decoder: Ok(Event::UnknownLengthMap));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(Event::Break));
-		assert!(decoder.ready_to_finish(false).unwrap());
+		assert!(decoder.ready_to_finish());
 	}
 
 	#[test]
@@ -1112,16 +1109,16 @@ mod test {
 		let mut decoder = Decoder::new(Cursor::new(b"\xBF\x00\xFF"));
 		decode_test!(match decoder: Ok(Event::UnknownLengthMap));
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 	}
 
 	#[test]
 	fn decode_tag() {
 		let mut decoder = Decoder::new(Cursor::new(b"\xC1\x00"));
 		decode_test!(match decoder: Ok(Event::Tag(1)));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(decoder.ready_to_finish(false).unwrap());
+		assert!(decoder.ready_to_finish());
 	}
 
 	#[test]
