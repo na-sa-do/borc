@@ -153,7 +153,7 @@ impl Decoder {
 			}
 			Event::Array(len) => {
 				let mut arr = Vec::with_capacity(len.try_into().unwrap_or(usize::MAX));
-				for i in 0..len {
+				for _ in 0..len {
 					match self.decode_inner(decoder)? {
 						None => return Err(DecodeError::Malformed),
 						Some(item) => arr.push(item),
@@ -162,7 +162,16 @@ impl Decoder {
 				assert_eq!(arr.len(), len as _);
 				Item::Array(arr)
 			}
-			Event::UnknownLengthArray => todo!(),
+			Event::UnknownLengthArray => {
+				let mut arr = Vec::new();
+				loop {
+					match self.decode_inner(decoder)? {
+						None => break,
+						Some(item) => arr.push(item),
+					}
+				}
+				Item::Array(arr)
+			}
 			Event::Map(len) => todo!(),
 			Event::UnknownLengthMap => todo!(),
 			Event::Tag(tag) => match self.decode_inner(decoder) {
@@ -218,6 +227,12 @@ mod test {
 	fn decode_array() {
 		decode_test!(b"\x80" => Ok(Item::Array(v)) if v.is_empty());
 		decode_test!(b"\x84\x00\x01\x02\x03" => Ok(Item::Array(v)) if v == [0,1,2,3].map(|x| Item::Unsigned(x)));
+	}
+
+	#[test]
+	fn decode_array_segmented() {
+		decode_test!(b"\x9F\xFF" => Ok(Item::Array(v)) if v.is_empty());
+		decode_test!(b"\x9F\x00\x00\xFF" => Ok(Item::Array(v)) if v == vec![Item::Unsigned(0); 2]);
 	}
 
 	#[test]
