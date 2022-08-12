@@ -6,3 +6,4 @@
 //! However, it does distinguish between integers and floating-point numbers, even if their value is the same.
 
 pub mod streaming;
+pub mod tree;
