@@ -172,8 +172,36 @@ impl Decoder {
 				}
 				Item::Array(arr)
 			}
-			Event::Map(len) => todo!(),
-			Event::UnknownLengthMap => todo!(),
+			Event::Map(len) => {
+				let mut map = Vec::with_capacity(len.try_into().unwrap_or(usize::MAX));
+				for _ in 0..len {
+					let key = match self.decode_inner(decoder)? {
+						None => return Err(DecodeError::Malformed),
+						Some(item) => item,
+					};
+					let val = match self.decode_inner(decoder)? {
+						None => return Err(DecodeError::Malformed),
+						Some(item) => item,
+					};
+					map.push((key, val));
+				}
+				Item::Map(map)
+			}
+			Event::UnknownLengthMap => {
+				let mut map = Vec::new();
+				loop {
+					let key = match self.decode_inner(decoder)? {
+						None => break,
+						Some(item) => item,
+					};
+					let val = match self.decode_inner(decoder)? {
+						None => return Err(DecodeError::Malformed),
+						Some(item) => item,
+					};
+					map.push((key, val));
+				}
+				Item::Map(map)
+			}
 			Event::Tag(tag) => match self.decode_inner(decoder) {
 				Ok(Some(value)) => Item::Tag(tag, Box::new(value)),
 				Ok(None) => return Err(DecodeError::Malformed),
@@ -233,6 +261,24 @@ mod test {
 	fn decode_array_segmented() {
 		decode_test!(b"\x9F\xFF" => Ok(Item::Array(v)) if v.is_empty());
 		decode_test!(b"\x9F\x00\x00\xFF" => Ok(Item::Array(v)) if v == vec![Item::Unsigned(0); 2]);
+	}
+
+	#[test]
+	fn decode_map() {
+		decode_test!(b"\xA0" => Ok(Item::Map(m)) if m.is_empty());
+		decode_test!(b"\xA1\x00\x01" => Ok(Item::Map(m)) if m == [(Item::Unsigned(0), Item::Unsigned(1))]);
+	}
+
+	#[test]
+	fn decode_map_segmented() {
+		decode_test!(b"\xBF\xFF" => Ok(Item::Map(m)) if m.is_empty());
+		decode_test!(b"\xBF\x00\x01\xFF" => Ok(Item::Map(m)) if m == [(Item::Unsigned(0), Item::Unsigned(1))]);
+	}
+
+	#[test]
+	fn decode_map_wrong() {
+		decode_test!(b"\xA1\x00" => Err(DecodeError::Insufficient));
+		decode_test!(b"\xBF\x00\xFF" => Err(DecodeError::Malformed));
 	}
 
 	#[test]
