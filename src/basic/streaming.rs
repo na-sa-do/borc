@@ -35,7 +35,7 @@ fn read_be_u64(input: &[u8]) -> u64 {
 #[derive(Debug, Clone)]
 pub struct Decoder<T: Read> {
 	source: RefCell<T>,
-	input_buffer: RefCell<VecDeque<u8>>,
+	input_buffer: VecDeque<u8>,
 	pending: Vec<Pending>,
 }
 
@@ -59,7 +59,7 @@ impl<T: Read> Decoder<T> {
 	pub fn new(source: T) -> Self {
 		Decoder {
 			source: RefCell::new(source),
-			input_buffer: RefCell::new(VecDeque::with_capacity(128)),
+			input_buffer: VecDeque::with_capacity(128),
 			pending: Vec::new(),
 		}
 	}
@@ -67,7 +67,7 @@ impl<T: Read> Decoder<T> {
 	/// Pull an event from the decoder.
 	pub fn next_event(&mut self) -> Result<Event, DecodeError> {
 		use TryNextEventOutcome::*;
-		self.input_buffer.get_mut().make_contiguous();
+		self.input_buffer.make_contiguous();
 		loop {
 			match self.try_next_event() {
 				GotEvent(e) => return Ok(e),
@@ -77,7 +77,7 @@ impl<T: Read> Decoder<T> {
 		}
 	}
 
-	fn extend_input_buffer(&self, by: NonZeroUsize) -> Result<(), DecodeError> {
+	fn extend_input_buffer(&mut self, by: NonZeroUsize) -> Result<(), DecodeError> {
 		let mut buf = Vec::with_capacity(by.into());
 		buf.resize(by.into(), 0);
 		match self.source.borrow_mut().read_exact(&mut buf) {
@@ -90,13 +90,13 @@ impl<T: Read> Decoder<T> {
 				}
 			}
 		}
-		self.input_buffer.borrow_mut().extend(buf.into_iter());
+		self.input_buffer.extend(buf.into_iter());
 		Ok(())
 	}
 
 	fn try_next_event(&mut self) -> TryNextEventOutcome {
 		use TryNextEventOutcome::*;
-		let input = self.input_buffer.get_mut();
+		let input = &mut self.input_buffer;
 		if input.is_empty() {
 			Needs(1.try_into().unwrap())
 		} else {
@@ -333,7 +333,7 @@ impl<T: Read> Decoder<T> {
 	/// If this returns true, it means cutting off the CBOR now results in a complete object, _and_ there is no extra data in the internal buffer.
 	/// There can be extra data in the internal buffer if a partial CBOR event has just been read.
 	pub fn ready_to_finish(&self) -> bool {
-		self.pending.is_empty() && self.input_buffer.borrow().is_empty()
+		self.pending.is_empty() && self.input_buffer.is_empty()
 	}
 
 	/// End the decoding.
@@ -355,7 +355,7 @@ impl<T: Read> Decoder<T> {
 	/// (The discrepancy is because [`Decoder`] contains an internal buffer.
 	/// Rest assured it behaves as if this buffer were not used.)
 	pub fn force_finish(self) -> impl Read {
-		let mut input_buffer = self.input_buffer.into_inner();
+		let mut input_buffer = self.input_buffer;
 		let mut new_buffer = Vec::with_capacity(input_buffer.len());
 		new_buffer.extend_from_slice(input_buffer.make_contiguous());
 		let cursor = std::io::Cursor::new(new_buffer);
