@@ -8,7 +8,6 @@
 use crate::errors::{DecodeError, EncodeError};
 use std::{
 	cell::RefCell,
-	collections::VecDeque,
 	io::{Read, Write},
 	num::NonZeroUsize,
 };
@@ -35,7 +34,7 @@ fn read_be_u64(input: &[u8]) -> u64 {
 #[derive(Debug, Clone)]
 pub struct Decoder<T: Read> {
 	source: RefCell<T>,
-	input_buffer: VecDeque<u8>,
+	input_buffer: Vec<u8>,
 	pending: Vec<Pending>,
 }
 
@@ -59,7 +58,7 @@ impl<T: Read> Decoder<T> {
 	pub fn new(source: T) -> Self {
 		Decoder {
 			source: RefCell::new(source),
-			input_buffer: VecDeque::with_capacity(128),
+			input_buffer: Vec::with_capacity(128),
 			pending: Vec::new(),
 		}
 	}
@@ -67,7 +66,6 @@ impl<T: Read> Decoder<T> {
 	/// Pull an event from the decoder.
 	pub fn next_event(&mut self) -> Result<Event, DecodeError> {
 		use TryNextEventOutcome::*;
-		self.input_buffer.make_contiguous();
 		loop {
 			match self.try_next_event() {
 				GotEvent(e) => return Ok(e),
@@ -78,9 +76,16 @@ impl<T: Read> Decoder<T> {
 	}
 
 	fn extend_input_buffer(&mut self, by: NonZeroUsize) -> Result<(), DecodeError> {
-		let mut buf = Vec::with_capacity(by.into());
-		buf.resize(by.into(), 0);
-		match self.source.borrow_mut().read_exact(&mut buf) {
+		let by = by.into();
+		let orig_len = self.input_buffer.len();
+		self.input_buffer.reserve(by);
+		for _ in 0..by {
+			// 0xFF is used because encountering a string of them at the wrong time will usually cause an InvalidBreak,
+			// whereas encountering a string of (for example) zeros will be interpreted as valid.
+			self.input_buffer.push(0xFF);
+		}
+		let buf = &mut self.input_buffer[orig_len..];
+		match self.source.borrow_mut().read_exact(buf) {
 			Ok(()) => (),
 			Err(e) => {
 				if e.kind() == std::io::ErrorKind::UnexpectedEof {
@@ -90,7 +95,6 @@ impl<T: Read> Decoder<T> {
 				}
 			}
 		}
-		self.input_buffer.extend(buf.into_iter());
 		Ok(())
 	}
 
@@ -101,15 +105,6 @@ impl<T: Read> Decoder<T> {
 			Needs(1.try_into().unwrap())
 		} else {
 			let (event, size) = {
-				let input = {
-					let slices = input.as_slices();
-					assert_eq!(
-						slices.1.len(),
-						0,
-						"try_next_event called with non-contiguous buffer"
-					);
-					slices.0
-				};
 				let initial = input[0];
 				let excess = &input[1..];
 				let major = initial >> 5;
@@ -355,11 +350,7 @@ impl<T: Read> Decoder<T> {
 	/// (The discrepancy is because [`Decoder`] contains an internal buffer.
 	/// Rest assured it behaves as if this buffer were not used.)
 	pub fn force_finish(self) -> impl Read {
-		let mut input_buffer = self.input_buffer;
-		let mut new_buffer = Vec::with_capacity(input_buffer.len());
-		new_buffer.extend_from_slice(input_buffer.make_contiguous());
-		let cursor = std::io::Cursor::new(new_buffer);
-		cursor.chain(self.source.into_inner())
+		std::io::Cursor::new(self.input_buffer).chain(self.source.into_inner())
 	}
 }
 
