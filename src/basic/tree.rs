@@ -113,11 +113,11 @@ impl Decoder {
 		Ok(Some(match decoder.next_event()? {
 			Event::Unsigned(val) => Item::Unsigned(val),
 			Event::Signed(val) => Item::Signed(val),
-			Event::ByteString(val) => Item::ByteString(val),
+			Event::ByteString(val) => Item::ByteString(val.into_owned()),
 			Event::UnknownLengthByteString => {
 				let mut buffer: Vec<u8>;
 				match decoder.next_event()? {
-					Event::ByteString(b) => buffer = b,
+					Event::ByteString(b) => buffer = b.into_owned(),
 					Event::Break => buffer = Vec::new(),
 					_ => return Err(DecodeError::Malformed),
 				}
@@ -129,11 +129,11 @@ impl Decoder {
 					}
 				}
 			}
-			Event::TextString(val) => Item::TextString(val),
+			Event::TextString(val) => Item::TextString(val.into_owned()),
 			Event::UnknownLengthTextString => {
 				let mut buffer: String;
 				match decoder.next_event()? {
-					Event::TextString(b) => buffer = b,
+					Event::TextString(b) => buffer = b.into_owned(),
 					Event::Break => buffer = String::new(),
 					_ => return Err(DecodeError::Malformed),
 				}

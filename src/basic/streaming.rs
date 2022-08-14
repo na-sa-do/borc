@@ -7,6 +7,7 @@
 
 use crate::errors::{DecodeError, EncodeError};
 use std::{
+	borrow::Cow,
 	cell::RefCell,
 	io::{Read, Write},
 	num::NonZeroUsize,
@@ -49,7 +50,7 @@ enum Pending {
 
 #[derive(Debug)]
 enum TryNextEventOutcome {
-	GotEvent(Event),
+	GotEvent(Event<'static>),
 	Error(DecodeError),
 	Needs(NonZeroUsize),
 }
@@ -64,7 +65,26 @@ impl<T: Read> Decoder<T> {
 	}
 
 	/// Pull an event from the decoder.
+	///
+	/// Note that the resulting event does not, at present, actually borrow the decoder.
+	/// See [`next_event_static`] for details on why this is the case.
 	pub fn next_event(&mut self) -> Result<Event, DecodeError> {
+		self.next_event_static()
+	}
+
+	/// Pull an event from the decoder, copying its contents.
+	///
+	/// At the moment, the decoder isn't zero-copy.
+	/// Even though [`Event`] supports borrowing the contents of byte- and text-strings,
+	/// they are never borrowed in decoding, only in encoding.
+	/// However, [`next_event`] is typed as if it were zero-copy for forward compatibility.
+	///
+	/// For now, [`next_event`] just calls [`next_event_static`] internally,
+	/// and the signature causes Rust to forget that the resulting [`Event`] is `'static`,
+	/// so these methods are exactly the same.
+	/// If and when [`next_event`] is made zero-copy, this function will perform the copy automatically.
+	/// Thus, both functions maintain their APIs.
+	pub fn next_event_static(&mut self) -> Result<Event<'static>, DecodeError> {
 		use TryNextEventOutcome::*;
 		loop {
 			match self.try_next_event() {
@@ -208,7 +228,7 @@ impl<T: Read> Decoder<T> {
 								// remember that offset includes the initial
 								bounds_check!(len + offset - 1);
 								let contents = excess[offset - 1..len + offset - 1].to_owned();
-								(Event::ByteString(contents), len + offset)
+								(Event::ByteString(Cow::Owned(contents)), len + offset)
 							}
 							None => {
 								self.pending.push(Pending::Break);
@@ -225,7 +245,7 @@ impl<T: Read> Decoder<T> {
 								bounds_check!(len + offset - 1);
 								let contents = excess[offset - 1..len + offset - 1].to_owned();
 								match String::from_utf8(contents) {
-									Ok(s) => (Event::TextString(s), len + offset),
+									Ok(s) => (Event::TextString(Cow::Owned(s)), len + offset),
 									Err(e) => return Error(e.into()),
 								}
 							}
@@ -356,7 +376,7 @@ impl<T: Read> Decoder<T> {
 
 /// An event encountered while decoding or encoding CBOR using a streaming basic implementation.
 #[derive(Debug, Clone)]
-pub enum Event {
+pub enum Event<'a> {
 	/// An unsigned integer.
 	Unsigned(u64),
 	/// A signed integer in a slightly odd representation.
@@ -366,14 +386,14 @@ pub enum Event {
 	/// Use one of the `interpret_signed` associated functions to resolve this.
 	Signed(u64),
 	/// A byte string.
-	ByteString(Vec<u8>),
+	ByteString(Cow<'a, [u8]>),
 	/// The start of a byte string whose length is unknown.
 	///
 	/// After this event come a series of `ByteString` events, followed by a `Break`.
 	/// To get the true value of the byte string, concatenate the `ByteString` events together.
 	UnknownLengthByteString,
 	/// A text string.
-	TextString(String),
+	TextString(Cow<'a, str>),
 	/// The start of a text string whose length is unknown.
 	///
 	/// After this event come a series of `TextString` events, followed by a `Break`.
@@ -405,7 +425,7 @@ pub enum Event {
 	Break,
 }
 
-impl Event {
+impl Event<'_> {
 	/// Interpret a [`Event::Signed`] value.
 	///
 	/// # Overflow behavior
@@ -438,7 +458,7 @@ impl Event {
 	}
 
 	/// Create a [`Event::Signed`] or [`Event::Unsigned`] value.
-	pub fn create_signed(val: i64) -> Event {
+	pub fn create_signed(val: i64) -> Event<'static> {
 		if val.is_negative() {
 			Event::Signed(val.abs_diff(-1))
 		} else {
@@ -451,7 +471,7 @@ impl Event {
 	/// Because this takes an [`i128`], it can express all the numbers CBOR can encode.
 	/// However, some [`i128`]s cannot be encoded in basic CBOR integers.
 	/// In this case, it will return [`None`].
-	pub fn create_signed_wide(val: i128) -> Option<Event> {
+	pub fn create_signed_wide(val: i128) -> Option<Event<'static>> {
 		if val.is_negative() {
 			match val.abs_diff(-1).try_into() {
 				Ok(val) => Some(Event::Signed(val)),
@@ -803,18 +823,18 @@ mod test {
 
 	#[test]
 	fn decode_bytes() {
-		decode_test!([0x40] => Ok(Event::ByteString(x)) if x == b"");
-		decode_test!(b"\x45Hello" => Ok(Event::ByteString(x)) if x == b"Hello");
-		decode_test!(b"\x58\x04Halo" => Ok(Event::ByteString(x)) if x == b"Halo");
-		decode_test!(b"\x59\x00\x07Goodbye" => Ok(Event::ByteString(x)) if x == b"Goodbye");
-		decode_test!(b"\x5A\x00\x00\x00\x0DLong message!" => Ok(Event::ByteString(x)) if x == b"Long message!");
-		decode_test!(b"\x5B\x00\x00\x00\x00\x00\x00\x00\x01?" => Ok(Event::ByteString(x)) if x == b"?");
+		decode_test!([0x40] => Ok(Event::ByteString(Cow::Owned(x))) if x == b"");
+		decode_test!(b"\x45Hello" => Ok(Event::ByteString(Cow::Owned(x))) if x == b"Hello");
+		decode_test!(b"\x58\x04Halo" => Ok(Event::ByteString(Cow::Owned(x))) if x == b"Halo");
+		decode_test!(b"\x59\x00\x07Goodbye" => Ok(Event::ByteString(Cow::Owned(x))) if x == b"Goodbye");
+		decode_test!(b"\x5A\x00\x00\x00\x0DLong message!" => Ok(Event::ByteString(Cow::Owned(x))) if x == b"Long message!");
+		decode_test!(b"\x5B\x00\x00\x00\x00\x00\x00\x00\x01?" => Ok(Event::ByteString(Cow::Owned(x))) if x == b"?");
 	}
 
 	#[test]
 	fn encode_bytes() {
-		encode_test!(Event::ByteString(b"".to_vec()) => b"\x40");
-		encode_test!(Event::ByteString(b"abcd".to_vec()) => b"\x44abcd");
+		encode_test!(Event::ByteString(Cow::Borrowed(b"")) => b"\x40");
+		encode_test!(Event::ByteString(Cow::Borrowed(b"abcd")) => b"\x44abcd");
 
 		macro_rules! test {
 			($size:expr, $prefix:expr) => {
@@ -828,7 +848,7 @@ mod test {
 				let mut output = Vec::with_capacity(size + prefix.len());
 				let mut encoder = Encoder::new(Cursor::new(&mut output));
 				encoder
-					.feed_event(Event::ByteString(input.clone()))
+					.feed_event(Event::ByteString(Cow::Borrowed(&input)))
 					.unwrap();
 				assert_eq!(output[..prefix.len()], prefix);
 				assert_eq!(output[prefix.len()..], input);
@@ -838,7 +858,7 @@ mod test {
 		test!(0x30, [0x58, 0x30]);
 		test!(0x02FA, [0x59, 0x02, 0xFA]);
 		test!(0x010000, [0x5A, 0x00, 0x01, 0x00, 0x00]);
-		// Allocates about 12 GiB of memory! And iterates 4Gi times! Wow!
+		// Allocates about 8 GiB of memory! And iterates 4Gi times! Wow!
 		test!(
 			2usize.pow(32),
 			[0x5B, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]
@@ -850,9 +870,9 @@ mod test {
 		let mut decoder = Decoder::new(Cursor::new(b"\x5F\x44abcd\x43efg\xFF"));
 		decode_test!(match decoder: Ok(Event::UnknownLengthByteString));
 		assert!(!decoder.ready_to_finish());
-		decode_test!(match decoder: Ok(Event::ByteString(x)) if x == b"abcd");
+		decode_test!(match decoder: Ok(Event::ByteString(Cow::Owned(x))) if x == b"abcd");
 		assert!(!decoder.ready_to_finish());
-		decode_test!(match decoder: Ok(Event::ByteString(x)) if x == b"efg");
+		decode_test!(match decoder: Ok(Event::ByteString(Cow::Owned(x))) if x == b"efg");
 		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(Event::Break));
 		assert!(decoder.ready_to_finish());
@@ -862,7 +882,7 @@ mod test {
 	fn decode_bytes_segmented_small() {
 		let mut decoder = Decoder::new(Cursor::new(b"\x5F\x44abcd"));
 		decode_test!(match decoder: Ok(Event::UnknownLengthByteString));
-		decode_test!(match decoder: Ok(Event::ByteString(x)) if x == b"abcd");
+		decode_test!(match decoder: Ok(Event::ByteString(Cow::Owned(x))) if x == b"abcd");
 		decode_test!(match decoder: Err(DecodeError::Insufficient));
 		assert!(!decoder.ready_to_finish());
 	}
@@ -871,8 +891,8 @@ mod test {
 	fn encode_bytes_segmented() {
 		encode_test!(
 			Event::UnknownLengthByteString,
-			Event::ByteString(b"abcd".to_vec()),
-			Event::ByteString(b"efg".to_vec()),
+			Event::ByteString(Cow::Borrowed(b"abcd")),
+			Event::ByteString(Cow::Borrowed(b"efg")),
 			Event::Break
 			=> b"\x5F\x44abcd\x43efg\xFF",
 			check finish expecting matches!(event, Event::Break); event
@@ -897,8 +917,8 @@ mod test {
 
 	#[test]
 	fn encode_text() {
-		encode_test!(Event::TextString("".to_string()) => b"\x60");
-		encode_test!(Event::TextString("abcd".to_string()) => b"\x64abcd");
+		encode_test!(Event::TextString(Cow::Borrowed("")) => b"\x60");
+		encode_test!(Event::TextString(Cow::Borrowed("abcd")) => b"\x64abcd");
 
 		macro_rules! test {
 			($size:expr, $prefix:expr) => {
@@ -912,7 +932,7 @@ mod test {
 				let mut output = Vec::with_capacity(size + prefix.len());
 				let mut encoder = Encoder::new(Cursor::new(&mut output));
 				encoder
-					.feed_event(Event::TextString(input.clone()))
+					.feed_event(Event::TextString(Cow::Borrowed(&input)))
 					.unwrap();
 				assert_eq!(output[..prefix.len()], prefix);
 				assert_eq!(output[prefix.len()..], input.into_bytes());
@@ -922,7 +942,7 @@ mod test {
 		test!(0x30, [0x78, 0x30]);
 		test!(0x02FA, [0x79, 0x02, 0xFA]);
 		test!(0x010000, [0x7A, 0x00, 0x01, 0x00, 0x00]);
-		// Allocates about 12 GiB of memory! And iterates 4Gi times! Wowie wow wow!
+		// Allocates about 8 GiB of memory! And iterates 4Gi times! Wowie wow wow!
 		test!(
 			2usize.pow(32),
 			[0x7B, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]
@@ -964,8 +984,8 @@ mod test {
 	fn encode_text_segmented() {
 		encode_test!(
 			Event::UnknownLengthTextString,
-			Event::TextString("abcd".to_string()),
-			Event::TextString("efg".to_string()),
+			Event::TextString(Cow::Borrowed("abcd")),
+			Event::TextString(Cow::Borrowed("efg")),
 			Event::Break
 			=> b"\x7F\x64abcd\x63efg\xFF",
 			check finish expecting matches!(event, Event::Break); event
@@ -1055,9 +1075,9 @@ mod test {
 		encode_test!(
 			Event::Map(2),
 			Event::Unsigned(0),
-			Event::TextString("a".to_string()),
+			Event::TextString(Cow::Borrowed("a")),
 			Event::Unsigned(1),
-			Event::TextString("b".to_string())
+			Event::TextString(Cow::Borrowed("b"))
 			=> b"\xA2\x00\x61a\x01\x61b",
 			check finish expecting matches!(event, Event::TextString(ref s) if s == "b"); event
 		);
@@ -1085,9 +1105,9 @@ mod test {
 		encode_test!(
 			Event::UnknownLengthMap,
 			Event::Unsigned(0),
-			Event::TextString("a".to_string()),
+			Event::TextString(Cow::Borrowed("a")),
 			Event::Unsigned(1),
-			Event::TextString("b".to_string()),
+			Event::TextString(Cow::Borrowed("b")),
 			Event::Break
 			=> b"\xBF\x00\x61a\x01\x61b\xFF",
 			check finish expecting matches!(event, Event::Break); event
