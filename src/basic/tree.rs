@@ -101,15 +101,18 @@ impl Decoder {
 	}
 
 	/// Parse some CBOR.
+	///
+	/// This is just a shortcut for [`decode_inner`] which constructs the [`streaming::Decoder`] for you.
 	pub fn decode(self, source: impl Read) -> Result<Item, DecodeError> {
-		match self.decode_inner(&mut StreamingDecoder::new(source)) {
+		match self.decode_from_stream(&mut StreamingDecoder::new(source)) {
 			Ok(Some(item)) => Ok(item),
 			Ok(None) => Err(DecodeError::Malformed),
 			Err(e) => Err(e),
 		}
 	}
 
-	fn decode_inner(
+	/// Parse some CBOR from a provided streaming decoder.
+	pub fn decode_from_stream(
 		&self,
 		decoder: &mut StreamingDecoder<impl Read>,
 	) -> Result<Option<Item>, DecodeError> {
@@ -157,7 +160,7 @@ impl Decoder {
 			Event::Array(len) => {
 				let mut arr = Vec::with_capacity(len.try_into().unwrap_or(usize::MAX));
 				for _ in 0..len {
-					match self.decode_inner(decoder)? {
+					match self.decode_from_stream(decoder)? {
 						None => return Err(DecodeError::Malformed),
 						Some(item) => arr.push(item),
 					}
@@ -168,7 +171,7 @@ impl Decoder {
 			Event::UnknownLengthArray => {
 				let mut arr = Vec::new();
 				loop {
-					match self.decode_inner(decoder)? {
+					match self.decode_from_stream(decoder)? {
 						None => break,
 						Some(item) => arr.push(item),
 					}
@@ -178,11 +181,11 @@ impl Decoder {
 			Event::Map(len) => {
 				let mut map = Vec::with_capacity(len.try_into().unwrap_or(usize::MAX));
 				for _ in 0..len {
-					let key = match self.decode_inner(decoder)? {
+					let key = match self.decode_from_stream(decoder)? {
 						None => return Err(DecodeError::Malformed),
 						Some(item) => item,
 					};
-					let val = match self.decode_inner(decoder)? {
+					let val = match self.decode_from_stream(decoder)? {
 						None => return Err(DecodeError::Malformed),
 						Some(item) => item,
 					};
@@ -193,11 +196,11 @@ impl Decoder {
 			Event::UnknownLengthMap => {
 				let mut map = Vec::new();
 				loop {
-					let key = match self.decode_inner(decoder)? {
+					let key = match self.decode_from_stream(decoder)? {
 						None => break,
 						Some(item) => item,
 					};
-					let val = match self.decode_inner(decoder)? {
+					let val = match self.decode_from_stream(decoder)? {
 						None => return Err(DecodeError::Malformed),
 						Some(item) => item,
 					};
@@ -205,7 +208,7 @@ impl Decoder {
 				}
 				Item::Map(map)
 			}
-			Event::Tag(tag) => match self.decode_inner(decoder) {
+			Event::Tag(tag) => match self.decode_from_stream(decoder) {
 				Ok(Some(value)) => Item::Tag(tag, Box::new(value)),
 				Ok(None) => return Err(DecodeError::Malformed),
 				Err(e) => return Err(e),
