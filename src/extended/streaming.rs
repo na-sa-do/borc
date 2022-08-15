@@ -5,10 +5,11 @@
 //! It models CBOR as a series of [`Event`]s, which are not always full data items.
 //! In this way, it is comparable to SAX in the XML world.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, io::Read};
 
-use crate::basic::streaming::{
-	Decoder as BasicDecoder, Encoder as BasicEncoder, Event as BasicEvent,
+use crate::{
+	basic::streaming::{Decoder as BasicDecoder, Event as BasicEvent},
+	errors::DecodeError,
 };
 
 /// An event encountered while decoding or encoding CBOR using a streaming extended implementation.
@@ -129,5 +130,72 @@ impl Event<'_> {
 			Some(_) => unreachable!(),
 			None => None,
 		}
+	}
+}
+
+/// A streaming decoder for CBOR with extensions.
+#[derive(Debug, Clone)]
+pub struct Decoder<T: Read> {
+	basic: BasicDecoder<T>,
+}
+
+impl<T: Read> Decoder<T> {
+	pub fn new_from_basic_decoder(basic: BasicDecoder<T>) -> Self {
+		Self { basic }
+	}
+
+	pub fn new(source: T) -> Self {
+		Self::new_from_basic_decoder(BasicDecoder::new(source))
+	}
+
+	/// Pull an event from the decoder.
+	///
+	/// Note that the resulting event does not, at present, actually borrow the decoder.
+	/// At the moment, the decoder isn't zero-copy.
+	/// Even though [`Event`] supports borrowing the contents of byte- and text-strings,
+	/// they are never borrowed in decoding, only in encoding.
+	/// However, `next_event` is typed as if it were zero-copy for forward compatibility.
+	pub fn next_event(&mut self) -> Result<Event, DecodeError> {
+		Ok(match self.basic.next_event()? {
+			BasicEvent::Unsigned(n) => Event::Unsigned(n),
+			BasicEvent::Signed(n) => Event::Signed(n),
+			BasicEvent::ByteString(b) => Event::ByteString(b),
+			BasicEvent::UnknownLengthByteString => Event::UnknownLengthByteString,
+			BasicEvent::TextString(t) => Event::TextString(t),
+			BasicEvent::UnknownLengthTextString => Event::UnknownLengthTextString,
+			BasicEvent::Array(len) => Event::Array(len),
+			BasicEvent::UnknownLengthArray => Event::UnknownLengthArray,
+			BasicEvent::Map(len) => Event::Map(len),
+			BasicEvent::UnknownLengthMap => Event::UnknownLengthMap,
+			BasicEvent::Simple(s) => Event::Simple(s),
+			BasicEvent::Float(f) => Event::Float(f),
+			BasicEvent::Break => Event::Break,
+
+			BasicEvent::Tag(tag) => match tag {
+				_ => Event::UnrecognizedTag(tag),
+			},
+		})
+	}
+
+	/// Check whether it is possible to end the decoding now.
+	///
+	/// See [the basic counterpart](`crate::basic::streaming::Decoder::ready_to_finish`) for details.
+	pub fn ready_to_finish(&self) -> bool {
+		self.basic.ready_to_finish()
+	}
+
+	/// End the decoding.
+	///
+	/// This is [checked](`Self::ready_to_finish`) and will return [`DecodeError::Insufficient`] if the CBOR is incomplete.
+	/// If you've performed the check already, try [`Self::force_finish`].
+	pub fn finish(self) -> Result<T, DecodeError> {
+		self.basic.finish()
+	}
+
+	/// End the decoding, without checking whether the decoder is finished or not.
+	///
+	/// See [the basic counterpart](`crate::basic::streaming::Decoder::force_finish`) for details.
+	pub fn force_finish(self) -> impl Read {
+		self.basic.force_finish()
 	}
 }
