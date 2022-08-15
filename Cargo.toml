@@ -1,6 +1,6 @@
 [package]
 name = "borc"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "CBOR done right"
 repository = "https://github.com/na-sa-do/borc"

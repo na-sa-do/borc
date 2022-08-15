@@ -1,11 +1,17 @@
+//! A streaming implementation of the CBOR basic data model.
+//!
+//! This module allows you to parse and generate CBOR very efficiently,
+//! at the expense of being somewhat difficult to actually use.
+//! It models CBOR as a series of [`Event`]s, which are not always full data items.
+//! In this way, it is comparable to SAX in the XML world.
+
+use crate::errors::{DecodeError, EncodeError};
 use std::{
+	borrow::Cow,
 	cell::RefCell,
-	collections::VecDeque,
 	io::{Read, Write},
 	num::NonZeroUsize,
-	string::FromUtf8Error,
 };
-use thiserror::Error;
 
 fn read_be_u16(input: &[u8]) -> u16 {
 	let mut bytes = [0u8; 2];
@@ -25,27 +31,11 @@ fn read_be_u64(input: &[u8]) -> u64 {
 	u64::from_be_bytes(bytes)
 }
 
-/// Errors that can occur when decoding CBOR using [`Decoder`].
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum DecodeError {
-	#[error("malformed CBOR")]
-	Malformed,
-	#[error("excess data")]
-	Excess,
-	#[error("insufficient data")]
-	Insufficient,
-	#[error("invalid UTF-8: {0}")]
-	InvalidUtf8(#[from] FromUtf8Error),
-	#[error("{0}")]
-	IoError(#[from] std::io::Error),
-}
-
 /// A streaming decoder for the CBOR basic data model.
 #[derive(Debug, Clone)]
 pub struct Decoder<T: Read> {
 	source: RefCell<T>,
-	input_buffer: RefCell<VecDeque<u8>>,
+	input_buffer: Vec<u8>,
 	pending: Vec<Pending>,
 }
 
@@ -60,7 +50,7 @@ enum Pending {
 
 #[derive(Debug)]
 enum TryNextEventOutcome {
-	GotEvent(Event),
+	GotEvent(Event<'static>),
 	Error(DecodeError),
 	Needs(NonZeroUsize),
 }
@@ -69,15 +59,20 @@ impl<T: Read> Decoder<T> {
 	pub fn new(source: T) -> Self {
 		Decoder {
 			source: RefCell::new(source),
-			input_buffer: RefCell::new(VecDeque::with_capacity(128)),
+			input_buffer: Vec::with_capacity(128),
 			pending: Vec::new(),
 		}
 	}
 
 	/// Pull an event from the decoder.
+	///
+	/// Note that the resulting event does not, at present, actually borrow the decoder.
+	/// At the moment, the decoder isn't zero-copy.
+	/// Even though [`Event`] supports borrowing the contents of byte- and text-strings,
+	/// they are never borrowed in decoding, only in encoding.
+	/// However, `next_event` is typed as if it were zero-copy for forward compatibility.
 	pub fn next_event(&mut self) -> Result<Event, DecodeError> {
 		use TryNextEventOutcome::*;
-		self.input_buffer.get_mut().make_contiguous();
 		loop {
 			match self.try_next_event() {
 				GotEvent(e) => return Ok(e),
@@ -87,10 +82,17 @@ impl<T: Read> Decoder<T> {
 		}
 	}
 
-	fn extend_input_buffer(&self, by: NonZeroUsize) -> Result<(), DecodeError> {
-		let mut buf = Vec::with_capacity(by.into());
-		buf.resize(by.into(), 0);
-		match self.source.borrow_mut().read_exact(&mut buf) {
+	fn extend_input_buffer(&mut self, by: NonZeroUsize) -> Result<(), DecodeError> {
+		let by = by.into();
+		let orig_len = self.input_buffer.len();
+		self.input_buffer.reserve(by);
+		for _ in 0..by {
+			// 0xFF is used because encountering a string of them at the wrong time will usually cause an InvalidBreak,
+			// whereas encountering a string of (for example) zeros will be interpreted as valid.
+			self.input_buffer.push(0xFF);
+		}
+		let buf = &mut self.input_buffer[orig_len..];
+		match self.source.borrow_mut().read_exact(buf) {
 			Ok(()) => (),
 			Err(e) => {
 				if e.kind() == std::io::ErrorKind::UnexpectedEof {
@@ -100,26 +102,16 @@ impl<T: Read> Decoder<T> {
 				}
 			}
 		}
-		self.input_buffer.borrow_mut().extend(buf.into_iter());
 		Ok(())
 	}
 
 	fn try_next_event(&mut self) -> TryNextEventOutcome {
 		use TryNextEventOutcome::*;
-		let input = self.input_buffer.get_mut();
+		let input = &mut self.input_buffer;
 		if input.is_empty() {
 			Needs(1.try_into().unwrap())
 		} else {
 			let (event, size) = {
-				let input = {
-					let slices = input.as_slices();
-					assert_eq!(
-						slices.1.len(),
-						0,
-						"try_next_event called with non-contiguous buffer"
-					);
-					slices.0
-				};
 				let initial = input[0];
 				let excess = &input[1..];
 				let major = initial >> 5;
@@ -223,7 +215,7 @@ impl<T: Read> Decoder<T> {
 								// remember that offset includes the initial
 								bounds_check!(len + offset - 1);
 								let contents = excess[offset - 1..len + offset - 1].to_owned();
-								(Event::ByteString(contents), len + offset)
+								(Event::ByteString(Cow::Owned(contents)), len + offset)
 							}
 							None => {
 								self.pending.push(Pending::Break);
@@ -240,7 +232,7 @@ impl<T: Read> Decoder<T> {
 								bounds_check!(len + offset - 1);
 								let contents = excess[offset - 1..len + offset - 1].to_owned();
 								match String::from_utf8(contents) {
-									Ok(s) => (Event::TextString(s), len + offset),
+									Ok(s) => (Event::TextString(Cow::Owned(s)), len + offset),
 									Err(e) => return Error(e.into()),
 								}
 							}
@@ -340,45 +332,38 @@ impl<T: Read> Decoder<T> {
 
 	/// Check whether it is possible to end the decoding now.
 	///
-	/// This will report that it is not possible to end the decoding if there is excess data and the `ignore_excess` parameter is false.
-	///
-	/// Note that this method needs to read from the buffer in order to determine whether any data remains.
-	/// This is only the case if `ignore_excess` is false.
-	pub fn ready_to_finish(&self, ignore_excess: bool) -> Result<bool, std::io::Error> {
-		if ignore_excess {
-			Ok(self.pending.is_empty())
-		} else {
-			if self.input_buffer.borrow().is_empty() {
-				if let Err(e) = self.extend_input_buffer(1.try_into().unwrap()) {
-					match e {
-						DecodeError::Insufficient => Ok(self.pending.is_empty()),
-						DecodeError::IoError(ioe) => Err(ioe),
-						_ => unreachable!(),
-					}
-				} else {
-					Ok(false)
-				}
-			} else {
-				Ok(false)
-			}
-		}
+	/// If this returns true, it means cutting off the CBOR now results in a complete object, _and_ there is no extra data in the internal buffer.
+	/// There can be extra data in the internal buffer if a partial CBOR event has just been read.
+	pub fn ready_to_finish(&self) -> bool {
+		self.pending.is_empty() && self.input_buffer.is_empty()
 	}
 
 	/// End the decoding.
 	///
-	/// This will return the [`Decoder`] if there is excess data and the `ignore_excess` parameter is false.
-	pub fn finish(self, ignore_excess: bool) -> Result<Option<Self>, std::io::Error> {
-		if self.ready_to_finish(ignore_excess)? {
-			Ok(None)
+	/// This is [checked](`Self::ready_to_finish`) and will return [`DecodeError::Insufficient`] if the CBOR is incomplete.
+	/// If you've performed the check already, try [`Self::force_finish`].
+	pub fn finish(self) -> Result<T, DecodeError> {
+		if self.ready_to_finish() {
+			Ok(self.source.into_inner())
 		} else {
-			Ok(Some(self))
+			Err(DecodeError::Insufficient)
 		}
+	}
+
+	/// End the decoding, without checking whether the decoder is finished or not.
+	///
+	/// This does not return the original reader,
+	/// but the reader returned behaves as if it were the original reader.
+	/// (The discrepancy is because [`Decoder`] contains an internal buffer.
+	/// Rest assured it behaves as if this buffer were not used.)
+	pub fn force_finish(self) -> impl Read {
+		std::io::Cursor::new(self.input_buffer).chain(self.source.into_inner())
 	}
 }
 
 /// An event encountered while decoding or encoding CBOR using a streaming basic implementation.
 #[derive(Debug, Clone)]
-pub enum Event {
+pub enum Event<'a> {
 	/// An unsigned integer.
 	Unsigned(u64),
 	/// A signed integer in a slightly odd representation.
@@ -388,14 +373,14 @@ pub enum Event {
 	/// Use one of the `interpret_signed` associated functions to resolve this.
 	Signed(u64),
 	/// A byte string.
-	ByteString(Vec<u8>),
+	ByteString(Cow<'a, [u8]>),
 	/// The start of a byte string whose length is unknown.
 	///
 	/// After this event come a series of `ByteString` events, followed by a `Break`.
 	/// To get the true value of the byte string, concatenate the `ByteString` events together.
 	UnknownLengthByteString,
 	/// A text string.
-	TextString(String),
+	TextString(Cow<'a, str>),
 	/// The start of a text string whose length is unknown.
 	///
 	/// After this event come a series of `TextString` events, followed by a `Break`.
@@ -427,7 +412,28 @@ pub enum Event {
 	Break,
 }
 
-impl Event {
+impl Event<'_> {
+	/// Convert this [`Event`] to an owned value.
+	pub fn into_owned(self) -> Event<'static> {
+		let new = match self {
+			Self::Unsigned(n) => Self::Unsigned(n),
+			Self::Signed(n) => Self::Signed(n),
+			Self::ByteString(b) => Self::ByteString(Cow::Owned(b.into_owned())),
+			Self::UnknownLengthByteString => Self::UnknownLengthByteString,
+			Self::TextString(t) => Self::TextString(Cow::Owned(t.into_owned())),
+			Self::UnknownLengthTextString => Self::UnknownLengthTextString,
+			Self::Array(l) => Self::Array(l),
+			Self::UnknownLengthArray => Self::UnknownLengthArray,
+			Self::Map(l) => Self::Map(l),
+			Self::UnknownLengthMap => Self::UnknownLengthMap,
+			Self::Tag(t) => Self::Tag(t),
+			Self::Simple(s) => Self::Simple(s),
+			Self::Float(f) => Self::Float(f),
+			Self::Break => Self::Break,
+		};
+		unsafe { std::mem::transmute(new) }
+	}
+
 	/// Interpret a [`Event::Signed`] value.
 	///
 	/// # Overflow behavior
@@ -460,7 +466,7 @@ impl Event {
 	}
 
 	/// Create a [`Event::Signed`] or [`Event::Unsigned`] value.
-	pub fn create_signed(val: i64) -> Event {
+	pub fn create_signed(val: i64) -> Event<'static> {
 		if val.is_negative() {
 			Event::Signed(val.abs_diff(-1))
 		} else {
@@ -473,7 +479,7 @@ impl Event {
 	/// Because this takes an [`i128`], it can express all the numbers CBOR can encode.
 	/// However, some [`i128`]s cannot be encoded in basic CBOR integers.
 	/// In this case, it will return [`None`].
-	pub fn create_signed_wide(val: i128) -> Option<Event> {
+	pub fn create_signed_wide(val: i128) -> Option<Event<'static>> {
 		if val.is_negative() {
 			match val.abs_diff(-1).try_into() {
 				Ok(val) => Some(Event::Signed(val)),
@@ -639,20 +645,6 @@ impl<T: Write> Encoder<T> {
 	}
 }
 
-// Errors that can occur when encoding CBOR using [`Encoder`].
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum EncodeError {
-	#[error("excess data")]
-	Excess,
-	#[error("insufficient data")]
-	Insufficient,
-	#[error("{0}")]
-	IoError(#[from] std::io::Error),
-	#[error("break at invalid time")]
-	InvalidBreak,
-}
-
 #[cfg(test)]
 mod test {
 	use super::*;
@@ -680,7 +672,7 @@ mod test {
 		($in:expr => $out:pat if $cond:expr) => {
 			let mut decoder = Decoder::new(Cursor::new($in));
 			decode_test!(match decoder: $in => $out if $cond);
-			decoder.finish(false).unwrap();
+			decoder.finish().unwrap();
 		};
 		($in:expr => $out:pat) => {
 			decode_test!($in => $out if true);
@@ -688,7 +680,7 @@ mod test {
 		(small $in:expr) => {
 			let mut decoder = Decoder::new(Cursor::new($in));
 			decode_test!(match decoder: $in => Err(DecodeError::Insufficient));
-			assert!(!decoder.ready_to_finish(false).unwrap());
+			assert!(!decoder.ready_to_finish());
 		};
 	}
 
@@ -839,18 +831,18 @@ mod test {
 
 	#[test]
 	fn decode_bytes() {
-		decode_test!([0x40] => Ok(Event::ByteString(x)) if x == b"");
-		decode_test!(b"\x45Hello" => Ok(Event::ByteString(x)) if x == b"Hello");
-		decode_test!(b"\x58\x04Halo" => Ok(Event::ByteString(x)) if x == b"Halo");
-		decode_test!(b"\x59\x00\x07Goodbye" => Ok(Event::ByteString(x)) if x == b"Goodbye");
-		decode_test!(b"\x5A\x00\x00\x00\x0DLong message!" => Ok(Event::ByteString(x)) if x == b"Long message!");
-		decode_test!(b"\x5B\x00\x00\x00\x00\x00\x00\x00\x01?" => Ok(Event::ByteString(x)) if x == b"?");
+		decode_test!([0x40] => Ok(Event::ByteString(Cow::Owned(x))) if x == b"");
+		decode_test!(b"\x45Hello" => Ok(Event::ByteString(Cow::Owned(x))) if x == b"Hello");
+		decode_test!(b"\x58\x04Halo" => Ok(Event::ByteString(Cow::Owned(x))) if x == b"Halo");
+		decode_test!(b"\x59\x00\x07Goodbye" => Ok(Event::ByteString(Cow::Owned(x))) if x == b"Goodbye");
+		decode_test!(b"\x5A\x00\x00\x00\x0DLong message!" => Ok(Event::ByteString(Cow::Owned(x))) if x == b"Long message!");
+		decode_test!(b"\x5B\x00\x00\x00\x00\x00\x00\x00\x01?" => Ok(Event::ByteString(Cow::Owned(x))) if x == b"?");
 	}
 
 	#[test]
 	fn encode_bytes() {
-		encode_test!(Event::ByteString(b"".to_vec()) => b"\x40");
-		encode_test!(Event::ByteString(b"abcd".to_vec()) => b"\x44abcd");
+		encode_test!(Event::ByteString(Cow::Borrowed(b"")) => b"\x40");
+		encode_test!(Event::ByteString(Cow::Borrowed(b"abcd")) => b"\x44abcd");
 
 		macro_rules! test {
 			($size:expr, $prefix:expr) => {
@@ -864,7 +856,7 @@ mod test {
 				let mut output = Vec::with_capacity(size + prefix.len());
 				let mut encoder = Encoder::new(Cursor::new(&mut output));
 				encoder
-					.feed_event(Event::ByteString(input.clone()))
+					.feed_event(Event::ByteString(Cow::Borrowed(&input)))
 					.unwrap();
 				assert_eq!(output[..prefix.len()], prefix);
 				assert_eq!(output[prefix.len()..], input);
@@ -874,7 +866,7 @@ mod test {
 		test!(0x30, [0x58, 0x30]);
 		test!(0x02FA, [0x59, 0x02, 0xFA]);
 		test!(0x010000, [0x5A, 0x00, 0x01, 0x00, 0x00]);
-		// Allocates about 12 GiB of memory! And iterates 4Gi times! Wow!
+		// Allocates about 8 GiB of memory! And iterates 4Gi times! Wow!
 		test!(
 			2usize.pow(32),
 			[0x5B, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]
@@ -885,30 +877,30 @@ mod test {
 	fn decode_bytes_segmented() {
 		let mut decoder = Decoder::new(Cursor::new(b"\x5F\x44abcd\x43efg\xFF"));
 		decode_test!(match decoder: Ok(Event::UnknownLengthByteString));
-		assert!(!decoder.ready_to_finish(false).unwrap());
-		decode_test!(match decoder: Ok(Event::ByteString(x)) if x == b"abcd");
-		assert!(!decoder.ready_to_finish(false).unwrap());
-		decode_test!(match decoder: Ok(Event::ByteString(x)) if x == b"efg");
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
+		decode_test!(match decoder: Ok(Event::ByteString(Cow::Owned(x))) if x == b"abcd");
+		assert!(!decoder.ready_to_finish());
+		decode_test!(match decoder: Ok(Event::ByteString(Cow::Owned(x))) if x == b"efg");
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(Event::Break));
-		assert!(decoder.ready_to_finish(false).unwrap());
+		assert!(decoder.ready_to_finish());
 	}
 
 	#[test]
 	fn decode_bytes_segmented_small() {
 		let mut decoder = Decoder::new(Cursor::new(b"\x5F\x44abcd"));
 		decode_test!(match decoder: Ok(Event::UnknownLengthByteString));
-		decode_test!(match decoder: Ok(Event::ByteString(x)) if x == b"abcd");
+		decode_test!(match decoder: Ok(Event::ByteString(Cow::Owned(x))) if x == b"abcd");
 		decode_test!(match decoder: Err(DecodeError::Insufficient));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 	}
 
 	#[test]
 	fn encode_bytes_segmented() {
 		encode_test!(
 			Event::UnknownLengthByteString,
-			Event::ByteString(b"abcd".to_vec()),
-			Event::ByteString(b"efg".to_vec()),
+			Event::ByteString(Cow::Borrowed(b"abcd")),
+			Event::ByteString(Cow::Borrowed(b"efg")),
 			Event::Break
 			=> b"\x5F\x44abcd\x43efg\xFF",
 			check finish expecting matches!(event, Event::Break); event
@@ -933,8 +925,8 @@ mod test {
 
 	#[test]
 	fn encode_text() {
-		encode_test!(Event::TextString("".to_string()) => b"\x60");
-		encode_test!(Event::TextString("abcd".to_string()) => b"\x64abcd");
+		encode_test!(Event::TextString(Cow::Borrowed("")) => b"\x60");
+		encode_test!(Event::TextString(Cow::Borrowed("abcd")) => b"\x64abcd");
 
 		macro_rules! test {
 			($size:expr, $prefix:expr) => {
@@ -948,7 +940,7 @@ mod test {
 				let mut output = Vec::with_capacity(size + prefix.len());
 				let mut encoder = Encoder::new(Cursor::new(&mut output));
 				encoder
-					.feed_event(Event::TextString(input.clone()))
+					.feed_event(Event::TextString(Cow::Borrowed(&input)))
 					.unwrap();
 				assert_eq!(output[..prefix.len()], prefix);
 				assert_eq!(output[prefix.len()..], input.into_bytes());
@@ -958,7 +950,7 @@ mod test {
 		test!(0x30, [0x78, 0x30]);
 		test!(0x02FA, [0x79, 0x02, 0xFA]);
 		test!(0x010000, [0x7A, 0x00, 0x01, 0x00, 0x00]);
-		// Allocates about 12 GiB of memory! And iterates 4Gi times! Wowie wow wow!
+		// Allocates about 8 GiB of memory! And iterates 4Gi times! Wowie wow wow!
 		test!(
 			2usize.pow(32),
 			[0x7B, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]
@@ -969,13 +961,13 @@ mod test {
 	fn decode_text_segmented() {
 		let mut decoder = Decoder::new(Cursor::new(b"\x7F\x64abcd\x63efg\xFF"));
 		decode_test!(match decoder: Ok(Event::UnknownLengthTextString));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(Event::TextString(x)) if x == "abcd");
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(Event::TextString(x)) if x == "efg");
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(Event::Break));
-		assert!(decoder.ready_to_finish(false).unwrap());
+		assert!(decoder.ready_to_finish());
 	}
 
 	#[test]
@@ -984,7 +976,7 @@ mod test {
 		decode_test!(match decoder: Ok(Event::UnknownLengthTextString));
 		decode_test!(match decoder: Ok(Event::TextString(x)) if x == "abcd");
 		decode_test!(match decoder: Err(DecodeError::Insufficient));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 	}
 
 	#[test]
@@ -1000,8 +992,8 @@ mod test {
 	fn encode_text_segmented() {
 		encode_test!(
 			Event::UnknownLengthTextString,
-			Event::TextString("abcd".to_string()),
-			Event::TextString("efg".to_string()),
+			Event::TextString(Cow::Borrowed("abcd")),
+			Event::TextString(Cow::Borrowed("efg")),
 			Event::Break
 			=> b"\x7F\x64abcd\x63efg\xFF",
 			check finish expecting matches!(event, Event::Break); event
@@ -1012,19 +1004,19 @@ mod test {
 	fn decode_array() {
 		let mut decoder = Decoder::new(Cursor::new(b"\x84\0\x01\x02\x03"));
 		decode_test!(match decoder: Ok(Event::Array(4)));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(decoder.ready_to_finish(false).unwrap());
+		assert!(decoder.ready_to_finish());
 
 		let mut decoder = Decoder::new(Cursor::new(b"\x80"));
 		decode_test!(match decoder: Ok(Event::Array(0)));
-		assert!(decoder.ready_to_finish(false).unwrap());
+		assert!(decoder.ready_to_finish());
 	}
 
 	#[test]
@@ -1043,15 +1035,15 @@ mod test {
 	fn decode_array_segmented() {
 		let mut decoder = Decoder::new(Cursor::new(b"\x9F\x00\x00\x00\xFF"));
 		decode_test!(match decoder: Ok(Event::UnknownLengthArray));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(Event::Break));
-		assert!(decoder.ready_to_finish(false).unwrap());
+		assert!(decoder.ready_to_finish());
 	}
 
 	#[test]
@@ -1071,19 +1063,19 @@ mod test {
 	fn decode_map() {
 		let mut decoder = Decoder::new(Cursor::new(b"\xA2\x01\x02\x03\x04"));
 		decode_test!(match decoder: Ok(Event::Map(2)));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(decoder.ready_to_finish(false).unwrap());
+		assert!(decoder.ready_to_finish());
 
 		let mut decoder = Decoder::new(Cursor::new(b"\xA0"));
 		decode_test!(match decoder: Ok(Event::Map(0)));
-		assert!(decoder.ready_to_finish(false).unwrap());
+		assert!(decoder.ready_to_finish());
 	}
 
 	#[test]
@@ -1091,9 +1083,9 @@ mod test {
 		encode_test!(
 			Event::Map(2),
 			Event::Unsigned(0),
-			Event::TextString("a".to_string()),
+			Event::TextString(Cow::Borrowed("a")),
 			Event::Unsigned(1),
-			Event::TextString("b".to_string())
+			Event::TextString(Cow::Borrowed("b"))
 			=> b"\xA2\x00\x61a\x01\x61b",
 			check finish expecting matches!(event, Event::TextString(ref s) if s == "b"); event
 		);
@@ -1103,17 +1095,17 @@ mod test {
 	fn decode_map_segmented() {
 		let mut decoder = Decoder::new(Cursor::new(b"\xBF\x00\x00\x00\x00\xFF"));
 		decode_test!(match decoder: Ok(Event::UnknownLengthMap));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(Event::Break));
-		assert!(decoder.ready_to_finish(false).unwrap());
+		assert!(decoder.ready_to_finish());
 	}
 
 	#[test]
@@ -1121,9 +1113,9 @@ mod test {
 		encode_test!(
 			Event::UnknownLengthMap,
 			Event::Unsigned(0),
-			Event::TextString("a".to_string()),
+			Event::TextString(Cow::Borrowed("a")),
 			Event::Unsigned(1),
-			Event::TextString("b".to_string()),
+			Event::TextString(Cow::Borrowed("b")),
 			Event::Break
 			=> b"\xBF\x00\x61a\x01\x61b\xFF",
 			check finish expecting matches!(event, Event::Break); event
@@ -1136,16 +1128,16 @@ mod test {
 		let mut decoder = Decoder::new(Cursor::new(b"\xBF\x00\xFF"));
 		decode_test!(match decoder: Ok(Event::UnknownLengthMap));
 		decode_test!(match decoder: Ok(_));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 	}
 
 	#[test]
 	fn decode_tag() {
 		let mut decoder = Decoder::new(Cursor::new(b"\xC1\x00"));
 		decode_test!(match decoder: Ok(Event::Tag(1)));
-		assert!(!decoder.ready_to_finish(false).unwrap());
+		assert!(!decoder.ready_to_finish());
 		decode_test!(match decoder: Ok(_));
-		assert!(decoder.ready_to_finish(false).unwrap());
+		assert!(decoder.ready_to_finish());
 	}
 
 	#[test]
