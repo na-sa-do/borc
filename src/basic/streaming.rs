@@ -67,24 +67,11 @@ impl<T: Read> Decoder<T> {
 	/// Pull an event from the decoder.
 	///
 	/// Note that the resulting event does not, at present, actually borrow the decoder.
-	/// See [`Self::next_event_static`] for details on why this is the case.
-	pub fn next_event(&mut self) -> Result<Event, DecodeError> {
-		self.next_event_static()
-	}
-
-	/// Pull an event from the decoder, copying its contents.
-	///
 	/// At the moment, the decoder isn't zero-copy.
 	/// Even though [`Event`] supports borrowing the contents of byte- and text-strings,
 	/// they are never borrowed in decoding, only in encoding.
 	/// However, `next_event` is typed as if it were zero-copy for forward compatibility.
-	///
-	/// For now, `next_event` just calls `next_event_static` internally,
-	/// and the signature causes Rust to forget that the resulting [`Event`] is `'static`,
-	/// so these methods are exactly the same.
-	/// If and when `next_event` is made zero-copy, this function will perform the copy automatically.
-	/// Thus, both functions maintain their APIs.
-	pub fn next_event_static(&mut self) -> Result<Event<'static>, DecodeError> {
+	pub fn next_event(&mut self) -> Result<Event, DecodeError> {
 		use TryNextEventOutcome::*;
 		loop {
 			match self.try_next_event() {
@@ -426,6 +413,27 @@ pub enum Event<'a> {
 }
 
 impl Event<'_> {
+	/// Convert this [`Event`] to an owned value.
+	pub fn into_owned(self) -> Event<'static> {
+		let new = match self {
+			Self::Unsigned(n) => Self::Unsigned(n),
+			Self::Signed(n) => Self::Signed(n),
+			Self::ByteString(b) => Self::ByteString(Cow::Owned(b.into_owned())),
+			Self::UnknownLengthByteString => Self::UnknownLengthByteString,
+			Self::TextString(t) => Self::TextString(Cow::Owned(t.into_owned())),
+			Self::UnknownLengthTextString => Self::UnknownLengthTextString,
+			Self::Array(l) => Self::Array(l),
+			Self::UnknownLengthArray => Self::UnknownLengthArray,
+			Self::Map(l) => Self::Map(l),
+			Self::UnknownLengthMap => Self::UnknownLengthMap,
+			Self::Tag(t) => Self::Tag(t),
+			Self::Simple(s) => Self::Simple(s),
+			Self::Float(f) => Self::Float(f),
+			Self::Break => Self::Break,
+		};
+		unsafe { std::mem::transmute(new) }
+	}
+
 	/// Interpret a [`Event::Signed`] value.
 	///
 	/// # Overflow behavior
