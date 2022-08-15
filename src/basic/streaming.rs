@@ -67,7 +67,7 @@ impl<T: Read> Decoder<T> {
 	/// Pull an event from the decoder.
 	///
 	/// Note that the resulting event does not, at present, actually borrow the decoder.
-	/// See [`next_event_static`] for details on why this is the case.
+	/// See [`Self::next_event_static`] for details on why this is the case.
 	pub fn next_event(&mut self) -> Result<Event, DecodeError> {
 		self.next_event_static()
 	}
@@ -77,12 +77,12 @@ impl<T: Read> Decoder<T> {
 	/// At the moment, the decoder isn't zero-copy.
 	/// Even though [`Event`] supports borrowing the contents of byte- and text-strings,
 	/// they are never borrowed in decoding, only in encoding.
-	/// However, [`next_event`] is typed as if it were zero-copy for forward compatibility.
+	/// However, `next_event` is typed as if it were zero-copy for forward compatibility.
 	///
-	/// For now, [`next_event`] just calls [`next_event_static`] internally,
+	/// For now, `next_event` just calls `next_event_static` internally,
 	/// and the signature causes Rust to forget that the resulting [`Event`] is `'static`,
 	/// so these methods are exactly the same.
-	/// If and when [`next_event`] is made zero-copy, this function will perform the copy automatically.
+	/// If and when `next_event` is made zero-copy, this function will perform the copy automatically.
 	/// Thus, both functions maintain their APIs.
 	pub fn next_event_static(&mut self) -> Result<Event<'static>, DecodeError> {
 		use TryNextEventOutcome::*;

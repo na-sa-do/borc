@@ -102,7 +102,7 @@ impl Decoder {
 
 	/// Parse some CBOR.
 	///
-	/// This is just a shortcut for [`decode_inner`] which constructs the [`streaming::Decoder`] for you.
+	/// This is just a shortcut for [`Self::decode_from_stream`] which constructs the [`streaming::Decoder`](`crate::basic::streaming::Decoder`) for you.
 	pub fn decode(self, source: impl Read) -> Result<Item, DecodeError> {
 		match self.decode_from_stream(&mut StreamingDecoder::new(source)) {
 			Ok(Some(item)) => Ok(item),
@@ -221,6 +221,7 @@ impl Decoder {
 }
 
 #[derive(Debug, Clone)]
+/// A tree-walking encoder for the CBOR basic data model.
 pub struct Encoder {}
 
 impl Encoder {
@@ -230,12 +231,12 @@ impl Encoder {
 
 	/// Encode some CBOR.
 	///
-	/// This is just a shortcut for [`encode_inner`] which constructs the [`streaming::Encoder`] for you.
+	/// This is just a shortcut for [`Self::encode_to_stream`] which constructs the [`streaming::Encoder`](`crate::basic::streaming::Encoder`) for you.
 	pub fn encode(&self, cbor: &Item, dest: impl Write) -> Result<(), EncodeError> {
 		self.encode_to_stream(cbor, &mut StreamingEncoder::new(dest))
 	}
 
-	/// Encode some CBOR onto a provided encoder.
+	/// Encode some CBOR to a provided streaming encoder.
 	pub fn encode_to_stream(
 		&self,
 		cbor: &Item,
