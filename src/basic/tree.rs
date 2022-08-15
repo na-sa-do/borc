@@ -6,10 +6,13 @@
 //! It is comparable to DOM in the XML world.
 
 use crate::{
-	basic::streaming::{Decoder as StreamingDecoder, Event},
-	errors::DecodeError,
+	basic::streaming::{Decoder as StreamingDecoder, Encoder as StreamingEncoder, Event},
+	errors::{DecodeError, EncodeError},
 };
-use std::io::Read;
+use std::{
+	borrow::Cow,
+	io::{Read, Write},
+};
 
 /// An item in the CBOR basic data model.
 #[derive(Debug, Clone, PartialEq)]
@@ -214,6 +217,63 @@ impl Decoder {
 	}
 }
 
+#[derive(Debug, Clone)]
+pub struct Encoder {}
+
+impl Encoder {
+	pub fn new() -> Self {
+		Self {}
+	}
+
+	/// Encode some CBOR.
+	///
+	/// This is just a shortcut for [`encode_inner`] which constructs the [`streaming::Encoder`] for you.
+	pub fn encode(&self, cbor: &Item, dest: impl Write) -> Result<(), EncodeError> {
+		self.encode_to_stream(cbor, &mut StreamingEncoder::new(dest))
+	}
+
+	/// Encode some CBOR onto a provided encoder.
+	pub fn encode_to_stream(
+		&self,
+		cbor: &Item,
+		encoder: &mut StreamingEncoder<impl Write>,
+	) -> Result<(), EncodeError> {
+		match cbor {
+			Item::Unsigned(n) => encoder.feed_event(Event::Unsigned(*n)),
+			Item::Signed(n) => encoder.feed_event(Event::Signed(*n)),
+			Item::Float(f) => encoder.feed_event(Event::Float(*f)),
+			Item::ByteString(bytes) => {
+				encoder.feed_event(Event::ByteString(Cow::Borrowed(&*bytes)))
+			}
+			Item::TextString(text) => encoder.feed_event(Event::TextString(Cow::Borrowed(&*text))),
+			Item::Array(arr) => {
+				encoder.feed_event(Event::Array(
+					arr.len().try_into().expect("I'm on a 128-bit system? Wow."),
+				))?;
+				for item in arr.iter() {
+					self.encode_to_stream(item, encoder)?;
+				}
+				Ok(())
+			}
+			Item::Map(map) => {
+				encoder.feed_event(Event::Map(
+					map.len().try_into().expect("I'm on a 128-bit system? Wow."),
+				))?;
+				for (key, val) in map.iter() {
+					self.encode_to_stream(key, encoder)?;
+					self.encode_to_stream(val, encoder)?;
+				}
+				Ok(())
+			}
+			Item::Tag(tag, val) => {
+				encoder.feed_event(Event::Tag(*tag))?;
+				self.encode_to_stream(val, encoder)
+			}
+			Item::Simple(n) => encoder.feed_event(Event::Simple(*n)),
+		}
+	}
+}
+
 #[cfg(test)]
 mod test {
 	use super::*;
@@ -229,6 +289,18 @@ mod test {
 		($in:expr => $out:pat) => {
 			decode_test!($in => $out if true);
 		}
+	}
+
+	macro_rules! encode_test {
+		($in:expr => $out:expr) => {
+			let input = $in;
+			let output = $out;
+			let mut buf = Vec::with_capacity(output.len());
+			Encoder::new()
+				.encode(&input, std::io::Cursor::new(&mut buf))
+				.unwrap();
+			assert_eq!(buf, output, "{:?} => {:X?}", input, buf);
+		};
 	}
 
 	#[test]
@@ -264,6 +336,17 @@ mod test {
 	}
 
 	#[test]
+	fn encode_array() {
+		encode_test!(
+			Item::Array(vec![
+				Item::Unsigned(0),
+				Item::Unsigned(1),
+			])
+			=> b"\x82\x00\x01"
+		);
+	}
+
+	#[test]
 	fn decode_map() {
 		decode_test!(b"\xA0" => Ok(Item::Map(m)) if m.is_empty());
 		decode_test!(b"\xA1\x00\x01" => Ok(Item::Map(m)) if m == [(Item::Unsigned(0), Item::Unsigned(1))]);
@@ -282,6 +365,17 @@ mod test {
 	}
 
 	#[test]
+	fn encode_map() {
+		encode_test!(
+			Item::Map(vec![
+				(Item::Unsigned(0), Item::Unsigned(1)),
+				(Item::Unsigned(2), Item::Unsigned(3)),
+			])
+			=> b"\xA2\x00\x01\x02\x03"
+		);
+	}
+
+	#[test]
 	fn decode_tag() {
 		decode_test!(b"\xC1\x00" => Ok(Item::Tag(1, sub)) if matches!(*sub, Item::Unsigned(0)));
 	}
@@ -290,5 +384,10 @@ mod test {
 	fn decode_tag_wrong() {
 		decode_test!(b"\xC1" => Err(DecodeError::Insufficient));
 		decode_test!(b"\xC1\xFF" => Err(DecodeError::Malformed));
+	}
+
+	#[test]
+	fn encode_tag() {
+		encode_test!(Item::Tag(1, Box::new(Item::Unsigned(0))) => b"\xC1\x00");
 	}
 }
