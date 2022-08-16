@@ -5,12 +5,11 @@
 //! It models CBOR as a series of [`Event`]s, which are not always full data items.
 //! In this way, it is comparable to SAX in the XML world.
 
-use std::{borrow::Cow, io::Read};
-
 use crate::{
 	basic::streaming::{Decoder as BasicDecoder, Event as BasicEvent},
 	errors::DecodeError,
 };
+use std::{borrow::Cow, io::Read};
 
 /// An event encountered while decoding or encoding CBOR using a streaming extended implementation.
 #[derive(Debug, Clone)]
@@ -67,23 +66,22 @@ pub enum Event<'a> {
 impl Event<'_> {
 	/// Convert this [`Event`] to an owned value.
 	pub fn into_owned(self) -> Event<'static> {
-		let new = match self {
-			Self::Unsigned(n) => Self::Unsigned(n),
-			Self::Signed(n) => Self::Signed(n),
-			Self::ByteString(b) => Self::ByteString(Cow::Owned(b.into_owned())),
-			Self::UnknownLengthByteString => Self::UnknownLengthByteString,
-			Self::TextString(t) => Self::TextString(Cow::Owned(t.into_owned())),
-			Self::UnknownLengthTextString => Self::UnknownLengthTextString,
-			Self::Array(l) => Self::Array(l),
-			Self::UnknownLengthArray => Self::UnknownLengthArray,
-			Self::Map(l) => Self::Map(l),
-			Self::UnknownLengthMap => Self::UnknownLengthMap,
-			Self::UnrecognizedTag(t) => Self::UnrecognizedTag(t),
-			Self::Simple(s) => Self::Simple(s),
-			Self::Float(f) => Self::Float(f),
-			Self::Break => Self::Break,
-		};
-		unsafe { std::mem::transmute(new) }
+		match self {
+			Self::Unsigned(n) => Event::Unsigned(n),
+			Self::Signed(n) => Event::Signed(n),
+			Self::ByteString(b) => Event::ByteString(Cow::Owned(b.into_owned())),
+			Self::UnknownLengthByteString => Event::UnknownLengthByteString,
+			Self::TextString(t) => Event::TextString(Cow::Owned(t.into_owned())),
+			Self::UnknownLengthTextString => Event::UnknownLengthTextString,
+			Self::Array(l) => Event::Array(l),
+			Self::UnknownLengthArray => Event::UnknownLengthArray,
+			Self::Map(l) => Event::Map(l),
+			Self::UnknownLengthMap => Event::UnknownLengthMap,
+			Self::UnrecognizedTag(t) => Event::UnrecognizedTag(t),
+			Self::Simple(s) => Event::Simple(s),
+			Self::Float(f) => Event::Float(f),
+			Self::Break => Event::Break,
+		}
 	}
 
 	/// Interpret a [`Event::Signed`] value.
