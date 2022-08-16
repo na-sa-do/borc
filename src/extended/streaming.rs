@@ -6,10 +6,13 @@
 //! In this way, it is comparable to SAX in the XML world.
 
 use crate::{
-	basic::streaming::{Decoder as BasicDecoder, Event as BasicEvent},
-	errors::DecodeError,
+	basic::streaming::{Decoder as BasicDecoder, Encoder as BasicEncoder, Event as BasicEvent},
+	errors::{DecodeError, EncodeError},
 };
-use std::{borrow::Cow, io::Read};
+use std::{
+	borrow::Cow,
+	io::{Read, Write},
+};
 
 /// An event encountered while decoding or encoding CBOR using a streaming extended implementation.
 #[derive(Debug, Clone)]
@@ -195,5 +198,45 @@ impl<T: Read> Decoder<T> {
 	/// See [the basic counterpart](`crate::basic::streaming::Decoder::force_finish`) for details.
 	pub fn force_finish(self) -> impl Read {
 		self.basic.force_finish()
+	}
+}
+
+/// A streaming encoder for CBOR with extensions.
+#[derive(Debug, Clone)]
+pub struct Encoder<T: Write> {
+	dest: BasicEncoder<T>,
+}
+
+impl<T: Write> Encoder<T> {
+	pub fn new_from_basic_encoder(dest: BasicEncoder<T>) -> Self {
+		Self { dest }
+	}
+
+	pub fn new(dest: T) -> Self {
+		Self::new_from_basic_encoder(BasicEncoder::new(dest))
+	}
+
+	/// Feed an event to the decoder.
+	pub fn feed_event(&mut self, event: Event) -> Result<(), EncodeError> {
+		self.dest.feed_event(match event {
+			Event::Unsigned(n) => BasicEvent::Unsigned(n),
+			Event::Signed(n) => BasicEvent::Signed(n),
+			Event::ByteString(b) => BasicEvent::ByteString(b),
+			Event::UnknownLengthByteString => BasicEvent::UnknownLengthByteString,
+			Event::TextString(t) => BasicEvent::TextString(t),
+			Event::UnknownLengthTextString => BasicEvent::UnknownLengthTextString,
+			Event::Array(len) => BasicEvent::Array(len),
+			Event::UnknownLengthArray => BasicEvent::UnknownLengthArray,
+			Event::Map(len) => BasicEvent::Map(len),
+			Event::UnknownLengthMap => BasicEvent::UnknownLengthMap,
+			Event::UnrecognizedTag(t) => BasicEvent::Tag(t),
+			Event::Simple(s) => BasicEvent::Simple(s),
+			Event::Float(f) => BasicEvent::Float(f),
+			Event::Break => BasicEvent::Break,
+		})
+	}
+
+	pub fn ready_to_finish(&self) -> bool {
+		self.dest.ready_to_finish()
 	}
 }
