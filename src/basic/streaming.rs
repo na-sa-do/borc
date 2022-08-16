@@ -492,6 +492,7 @@ impl Event<'_> {
 }
 
 /// A streaming encoder for the CBOR basic data model.
+#[derive(Debug, Clone)]
 pub struct Encoder<T: Write> {
 	dest: T,
 	pending: Vec<Pending>,
