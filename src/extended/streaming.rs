@@ -8,6 +8,7 @@
 use crate::{
 	basic::streaming::{Decoder as BasicDecoder, Encoder as BasicEncoder, Event as BasicEvent},
 	errors::{DecodeError, EncodeError},
+	extended::{DateTimeDecodeStyle, DateTimeEncodeStyle},
 };
 use std::{
 	borrow::Cow,
@@ -16,8 +17,6 @@ use std::{
 
 #[cfg(feature = "chrono")]
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
-
-use super::DateTimeEncodeStyle;
 
 /// An event encountered while decoding or encoding CBOR using a streaming extended implementation.
 #[derive(Debug, Clone, PartialEq)]
@@ -73,7 +72,7 @@ pub enum Event<'a> {
 	/// A date/time.
 	///
 	/// This corresponds to tags 0 and 1.
-	///  and only appears if the [`Decoder::date_time_style`] extension is set to [`Chrono`](`crate::extended::DateTimeDecodeStyle::Chrono`).
+	///  and only appears if the [`Decoder::date_time_style`] extension is set to [`Chrono`](`DateTimeDecodeStyle::Chrono`).
 	#[cfg(feature = "chrono")]
 	ChronoDateTime(DateTime<FixedOffset>),
 }
@@ -171,14 +170,14 @@ macro_rules! config_accessors {
 #[derive(Debug, Clone)]
 pub struct Decoder<T: Read> {
 	basic: BasicDecoder<T>,
-	date_time_style: Option<super::DateTimeDecodeStyle>,
+	date_time_style: DateTimeDecodeStyle,
 }
 
 impl<T: Read> Decoder<T> {
 	pub fn new_from_basic_decoder(basic: BasicDecoder<T>) -> Self {
 		Self {
 			basic,
-			date_time_style: None,
+			date_time_style: Default::default(),
 		}
 	}
 
@@ -188,7 +187,7 @@ impl<T: Read> Decoder<T> {
 
 	config_accessors!(
 		date_time_style,
-		Option<super::DateTimeDecodeStyle>,
+		DateTimeDecodeStyle,
 		date_time_style,
 		date_time_style_mut,
 		set_date_time_style
@@ -202,6 +201,8 @@ impl<T: Read> Decoder<T> {
 	/// they are never borrowed in decoding, only in encoding.
 	/// However, `next_event` is typed as if it were zero-copy for forward compatibility.
 	pub fn next_event(&mut self) -> Result<Event, DecodeError> {
+		use DateTimeDecodeStyle as DateTimeStyle;
+
 		Ok(match self.basic.next_event()?.into_owned() {
 			BasicEvent::Unsigned(n) => Event::Unsigned(n),
 			BasicEvent::Signed(n) => Event::Signed(n),
@@ -219,9 +220,9 @@ impl<T: Read> Decoder<T> {
 
 			BasicEvent::Tag(tag) => match tag {
 				0 => match self.date_time_style {
-					None => Event::UnrecognizedTag(0),
+					DateTimeStyle::None => Event::UnrecognizedTag(0),
 					#[cfg(feature = "chrono")]
-					Some(super::DateTimeDecodeStyle::Chrono) => match self.basic.next_event()? {
+					DateTimeStyle::Chrono => match self.basic.next_event()? {
 						BasicEvent::TextString(t) => {
 							Event::ChronoDateTime(DateTime::parse_from_rfc3339(&t)?)
 						}
@@ -229,9 +230,9 @@ impl<T: Read> Decoder<T> {
 					},
 				},
 				1 => match self.date_time_style {
-					None => Event::UnrecognizedTag(1),
+					DateTimeStyle::None => Event::UnrecognizedTag(1),
 					#[cfg(feature = "chrono")]
-					Some(super::DateTimeDecodeStyle::Chrono) => match self.basic.next_event()? {
+					DateTimeStyle::Chrono => match self.basic.next_event()? {
 						BasicEvent::Unsigned(n) => {
 							let time: i64 = n.try_into().map_err(|_| DecodeError::TagInvalid(1))?;
 							Event::ChronoDateTime(Utc.timestamp(time, 0).into())
@@ -282,15 +283,13 @@ impl<T: Read> Decoder<T> {
 #[derive(Debug, Clone)]
 pub struct Encoder<T: Write> {
 	dest: BasicEncoder<T>,
-	#[cfg(feature = "chrono")]
-	date_time_style: super::DateTimeEncodeStyle,
+	date_time_style: DateTimeEncodeStyle,
 }
 
 impl<T: Write> Encoder<T> {
 	pub fn new_from_basic_encoder(dest: BasicEncoder<T>) -> Self {
 		Self {
 			dest,
-			#[cfg(feature = "chrono")]
 			date_time_style: Default::default(),
 		}
 	}
@@ -299,10 +298,9 @@ impl<T: Write> Encoder<T> {
 		Self::new_from_basic_encoder(BasicEncoder::new(dest))
 	}
 
-	#[cfg(feature = "chrono")]
 	config_accessors!(
 		date_time_style,
-		super::DateTimeEncodeStyle,
+		DateTimeEncodeStyle,
 		date_time_style,
 		date_time_style_mut,
 		set_date_time_style
@@ -366,7 +364,7 @@ mod test {
 	fn decode_chrono_text_datetime() {
 		assert_eq!(
 			Decoder::new(Cursor::new(b"\xC0\x741990-12-31T12:34:56Z"))
-				.set_date_time_style(Some(crate::extended::DateTimeDecodeStyle::Chrono))
+				.set_date_time_style(crate::extended::DateTimeDecodeStyle::Chrono)
 				.next_event()
 				.unwrap(),
 			Event::ChronoDateTime(Utc.ymd(1990, 12, 31).and_hms(12, 34, 56).into())
@@ -378,7 +376,7 @@ mod test {
 	fn decode_chrono_numeric_datetime() {
 		assert_eq!(
 			Decoder::new(Cursor::new(b"\xC1\x04"))
-				.set_date_time_style(Some(crate::extended::DateTimeDecodeStyle::Chrono))
+				.set_date_time_style(crate::extended::DateTimeDecodeStyle::Chrono)
 				.next_event()
 				.unwrap(),
 			Event::ChronoDateTime(Utc.ymd(1970, 01, 01).and_hms(00, 00, 04).into())
@@ -390,7 +388,7 @@ mod test {
 	fn decode_chrono_numeric_datetime_signed() {
 		assert_eq!(
 			Decoder::new(Cursor::new(b"\xC1\x20"))
-				.set_date_time_style(Some(crate::extended::DateTimeDecodeStyle::Chrono))
+				.set_date_time_style(crate::extended::DateTimeDecodeStyle::Chrono)
 				.next_event()
 				.unwrap(),
 			Event::ChronoDateTime(Utc.ymd(1969, 12, 31).and_hms(23, 59, 59).into())
@@ -402,7 +400,7 @@ mod test {
 	fn decode_chrono_numeric_datetime_fractional() {
 		assert_eq!(
 			Decoder::new(Cursor::new(b"\xC1\xFA\x3F\xA0\x00\x00"))
-				.set_date_time_style(Some(crate::extended::DateTimeDecodeStyle::Chrono))
+				.set_date_time_style(crate::extended::DateTimeDecodeStyle::Chrono)
 				.next_event()
 				.unwrap(),
 			Event::ChronoDateTime(Utc.ymd(1970, 01, 01).and_hms_milli(00, 00, 01, 250).into())

@@ -5,7 +5,7 @@
 //!
 //! At the moment, one extension is implemented:
 //! dates and times using the `chrono` crate.
-//! 
+//!
 //! (We can't link to other crates here if they may or may not be compiled in,
 //! because if they aren't rustdoc gets confused.)
 
@@ -18,11 +18,20 @@ pub mod streaming;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DateTimeDecodeStyle {
+	/// Do not handle datetimes.
+	None,
 	/// Use the [`chrono`] crate to handle datetimes.
 	///
 	/// This results in the use of the [`ChronoDateTime`](`streaming::Event::ChronoDateTime`) variant to handle datetimes.
 	#[cfg(feature = "chrono")]
 	Chrono,
+}
+
+impl Default for DateTimeDecodeStyle {
+	/// Return [`DateTimeDecodeStyle::None`].
+	fn default() -> Self {
+		Self::None
+	}
 }
 
 /// How to encode datetimes.
