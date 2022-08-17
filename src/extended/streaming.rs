@@ -14,8 +14,13 @@ use std::{
 	io::{Read, Write},
 };
 
+#[cfg(feature = "chrono")]
+use chrono::{DateTime, FixedOffset, TimeZone, Utc};
+
+use super::DateTimeEncodeStyle;
+
 /// An event encountered while decoding or encoding CBOR using a streaming extended implementation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Event<'a> {
 	/// An unsigned integer.
@@ -64,6 +69,13 @@ pub enum Event<'a> {
 	Float(f64),
 	/// The end of an unknown-length item.
 	Break,
+
+	/// A date/time.
+	///
+	/// This corresponds to tags 0 and 1.
+	///  and only appears if the [`Decoder::date_time_style`] extension is set to [`Chrono`](`crate::extended::DateTimeDecodeStyle::Chrono`).
+	#[cfg(feature = "chrono")]
+	ChronoDateTime(DateTime<FixedOffset>),
 }
 
 impl Event<'_> {
@@ -84,6 +96,9 @@ impl Event<'_> {
 			Self::Simple(s) => Event::Simple(s),
 			Self::Float(f) => Event::Float(f),
 			Self::Break => Event::Break,
+
+			#[cfg(feature = "chrono")]
+			Self::ChronoDateTime(dt) => Event::ChronoDateTime(dt),
 		}
 	}
 
@@ -134,20 +149,50 @@ impl Event<'_> {
 	}
 }
 
+#[allow(unused_macros)]
+macro_rules! config_accessors {
+	($field:ident, $type:ty, $getter:ident, $mut_getter:ident, $setter:ident) => {
+		pub fn $getter(&self) -> &$type {
+			&self.$field
+		}
+
+		pub fn $mut_getter(&mut self) -> &mut $type {
+			&mut self.$field
+		}
+
+		pub fn $setter(&mut self, value: $type) -> &mut Self {
+			self.$field = value;
+			self
+		}
+	};
+}
+
 /// A streaming decoder for CBOR with extensions.
 #[derive(Debug, Clone)]
 pub struct Decoder<T: Read> {
 	basic: BasicDecoder<T>,
+	date_time_style: Option<super::DateTimeDecodeStyle>,
 }
 
 impl<T: Read> Decoder<T> {
 	pub fn new_from_basic_decoder(basic: BasicDecoder<T>) -> Self {
-		Self { basic }
+		Self {
+			basic,
+			date_time_style: None,
+		}
 	}
 
 	pub fn new(source: T) -> Self {
 		Self::new_from_basic_decoder(BasicDecoder::new(source))
 	}
+
+	config_accessors!(
+		date_time_style,
+		Option<super::DateTimeDecodeStyle>,
+		date_time_style,
+		date_time_style_mut,
+		set_date_time_style
+	);
 
 	/// Pull an event from the decoder.
 	///
@@ -157,7 +202,7 @@ impl<T: Read> Decoder<T> {
 	/// they are never borrowed in decoding, only in encoding.
 	/// However, `next_event` is typed as if it were zero-copy for forward compatibility.
 	pub fn next_event(&mut self) -> Result<Event, DecodeError> {
-		Ok(match self.basic.next_event()? {
+		Ok(match self.basic.next_event()?.into_owned() {
 			BasicEvent::Unsigned(n) => Event::Unsigned(n),
 			BasicEvent::Signed(n) => Event::Signed(n),
 			BasicEvent::ByteString(b) => Event::ByteString(b),
@@ -173,6 +218,38 @@ impl<T: Read> Decoder<T> {
 			BasicEvent::Break => Event::Break,
 
 			BasicEvent::Tag(tag) => match tag {
+				0 => match self.date_time_style {
+					None => Event::UnrecognizedTag(0),
+					#[cfg(feature = "chrono")]
+					Some(super::DateTimeDecodeStyle::Chrono) => match self.basic.next_event()? {
+						BasicEvent::TextString(t) => {
+							Event::ChronoDateTime(DateTime::parse_from_rfc3339(&t)?)
+						}
+						_ => return Err(DecodeError::TagInvalid(0)),
+					},
+				},
+				1 => match self.date_time_style {
+					None => Event::UnrecognizedTag(1),
+					#[cfg(feature = "chrono")]
+					Some(super::DateTimeDecodeStyle::Chrono) => match self.basic.next_event()? {
+						BasicEvent::Unsigned(n) => {
+							let time: i64 = n.try_into().map_err(|_| DecodeError::TagInvalid(1))?;
+							Event::ChronoDateTime(Utc.timestamp(time, 0).into())
+						}
+						BasicEvent::Signed(n) => match BasicEvent::interpret_signed_checked(n) {
+							Some(time) => Event::ChronoDateTime(Utc.timestamp(time, 0).into()),
+							None => return Err(DecodeError::TagInvalid(1)),
+						},
+						BasicEvent::Float(f) => {
+							let seconds = (f - f.fract()) as i64;
+							let nanos = (f.fract() * 1_000_000_000f64) as i64;
+							Event::ChronoDateTime(
+								Utc.timestamp_nanos(seconds * 1_000_000_000 + nanos).into(),
+							)
+						}
+						_ => return Err(DecodeError::TagInvalid(0)),
+					},
+				},
 				_ => Event::UnrecognizedTag(tag),
 			},
 		})
@@ -205,20 +282,35 @@ impl<T: Read> Decoder<T> {
 #[derive(Debug, Clone)]
 pub struct Encoder<T: Write> {
 	dest: BasicEncoder<T>,
+	#[cfg(feature = "chrono")]
+	date_time_style: super::DateTimeEncodeStyle,
 }
 
 impl<T: Write> Encoder<T> {
 	pub fn new_from_basic_encoder(dest: BasicEncoder<T>) -> Self {
-		Self { dest }
+		Self {
+			dest,
+			#[cfg(feature = "chrono")]
+			date_time_style: Default::default(),
+		}
 	}
 
 	pub fn new(dest: T) -> Self {
 		Self::new_from_basic_encoder(BasicEncoder::new(dest))
 	}
 
-	/// Feed an event to the decoder.
+	#[cfg(feature = "chrono")]
+	config_accessors!(
+		date_time_style,
+		super::DateTimeEncodeStyle,
+		date_time_style,
+		date_time_style_mut,
+		set_date_time_style
+	);
+
+	/// Feed an event to the encoder.
 	pub fn feed_event(&mut self, event: Event) -> Result<(), EncodeError> {
-		self.dest.feed_event(match event {
+		let basic_event = match event {
 			Event::Unsigned(n) => BasicEvent::Unsigned(n),
 			Event::Signed(n) => BasicEvent::Signed(n),
 			Event::ByteString(b) => BasicEvent::ByteString(b),
@@ -233,10 +325,149 @@ impl<T: Write> Encoder<T> {
 			Event::Simple(s) => BasicEvent::Simple(s),
 			Event::Float(f) => BasicEvent::Float(f),
 			Event::Break => BasicEvent::Break,
-		})
+
+			#[cfg(feature = "chrono")]
+			Event::ChronoDateTime(dt) => match self.date_time_style {
+				DateTimeEncodeStyle::PreferText => {
+					self.dest.feed_event(BasicEvent::Tag(0))?;
+					BasicEvent::TextString(Cow::Owned(
+						dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+					))
+				}
+				DateTimeEncodeStyle::PreferNumeric => {
+					self.dest.feed_event(BasicEvent::Tag(1))?;
+					match dt.timestamp_subsec_nanos() {
+						0 => BasicEvent::create_signed(dt.timestamp()),
+						_ => BasicEvent::Float(
+							dt.timestamp() as f64
+								+ (dt.timestamp_subsec_nanos() as f64) / 1_000_000_000f64,
+						),
+					}
+				}
+			},
+		};
+		self.dest.feed_event(basic_event)
 	}
 
 	pub fn ready_to_finish(&self) -> bool {
 		self.dest.ready_to_finish()
+	}
+}
+
+#[cfg(test)]
+#[allow(unused)]
+mod test {
+	use super::*;
+	use chrono::{TimeZone, Utc};
+	use std::io::Cursor;
+
+	#[cfg(feature = "chrono")]
+	#[test]
+	fn decode_chrono_text_datetime() {
+		assert_eq!(
+			Decoder::new(Cursor::new(b"\xC0\x741990-12-31T12:34:56Z"))
+				.set_date_time_style(Some(crate::extended::DateTimeDecodeStyle::Chrono))
+				.next_event()
+				.unwrap(),
+			Event::ChronoDateTime(Utc.ymd(1990, 12, 31).and_hms(12, 34, 56).into())
+		);
+	}
+
+	#[cfg(feature = "chrono")]
+	#[test]
+	fn decode_chrono_numeric_datetime() {
+		assert_eq!(
+			Decoder::new(Cursor::new(b"\xC1\x04"))
+				.set_date_time_style(Some(crate::extended::DateTimeDecodeStyle::Chrono))
+				.next_event()
+				.unwrap(),
+			Event::ChronoDateTime(Utc.ymd(1970, 01, 01).and_hms(00, 00, 04).into())
+		);
+	}
+
+	#[cfg(feature = "chrono")]
+	#[test]
+	fn decode_chrono_numeric_datetime_signed() {
+		assert_eq!(
+			Decoder::new(Cursor::new(b"\xC1\x20"))
+				.set_date_time_style(Some(crate::extended::DateTimeDecodeStyle::Chrono))
+				.next_event()
+				.unwrap(),
+			Event::ChronoDateTime(Utc.ymd(1969, 12, 31).and_hms(23, 59, 59).into())
+		);
+	}
+
+	#[cfg(feature = "chrono")]
+	#[test]
+	fn decode_chrono_numeric_datetime_fractional() {
+		assert_eq!(
+			Decoder::new(Cursor::new(b"\xC1\xFA\x3F\xA0\x00\x00"))
+				.set_date_time_style(Some(crate::extended::DateTimeDecodeStyle::Chrono))
+				.next_event()
+				.unwrap(),
+			Event::ChronoDateTime(Utc.ymd(1970, 01, 01).and_hms_milli(00, 00, 01, 250).into())
+		);
+	}
+
+	#[cfg(feature = "chrono")]
+	#[test]
+	fn encode_chrono_text_datetime() {
+		let mut buf = Vec::new();
+		let mut enc = Encoder::new(Cursor::new(&mut buf));
+		assert_eq!(
+			enc.date_time_style(),
+			&crate::extended::DateTimeEncodeStyle::PreferText
+		);
+		enc.feed_event(Event::ChronoDateTime(
+			Utc.ymd(1990, 12, 31).and_hms(12, 34, 56).into(),
+		));
+		assert!(enc.ready_to_finish());
+		drop(enc);
+		assert_eq!(&buf, b"\xC0\x741990-12-31T12:34:56Z")
+	}
+
+	#[cfg(feature = "chrono")]
+	#[test]
+	fn encode_chrono_numeric_datetime() {
+		let mut buf = Vec::new();
+		let mut enc = Encoder::new(Cursor::new(&mut buf));
+		enc.set_date_time_style(crate::extended::DateTimeEncodeStyle::PreferNumeric);
+		enc.feed_event(Event::ChronoDateTime(
+			Utc.ymd(1970, 01, 01).and_hms(00, 00, 04).into(),
+		));
+		assert!(enc.ready_to_finish());
+		drop(enc);
+		assert_eq!(&buf, b"\xC1\x04");
+	}
+
+	#[cfg(feature = "chrono")]
+	#[test]
+	fn encode_chrono_text_datetime_fractional() {
+		let mut buf = Vec::new();
+		let mut enc = Encoder::new(Cursor::new(&mut buf));
+		assert_eq!(
+			enc.date_time_style(),
+			&crate::extended::DateTimeEncodeStyle::PreferText
+		);
+		enc.feed_event(Event::ChronoDateTime(
+			Utc.ymd(1876, 4, 22).and_hms_milli(13, 22, 1, 500).into(),
+		));
+		assert!(enc.ready_to_finish());
+		drop(enc);
+		assert_eq!(&buf, b"\xC0\x78\x181876-04-22T13:22:01.500Z");
+	}
+
+	#[cfg(feature = "chrono")]
+	#[test]
+	fn encode_chrono_numeric_datetime_fractional() {
+		let mut buf = Vec::new();
+		let mut enc = Encoder::new(Cursor::new(&mut buf));
+		enc.set_date_time_style(crate::extended::DateTimeEncodeStyle::PreferNumeric);
+		enc.feed_event(Event::ChronoDateTime(
+			Utc.ymd(1970, 01, 01).and_hms_milli(00, 00, 00, 500).into(),
+		));
+		assert!(enc.ready_to_finish());
+		drop(enc);
+		assert_eq!(&buf, b"\xC1\xF9\x38\x00");
 	}
 }
