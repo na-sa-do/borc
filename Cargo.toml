@@ -1,6 +1,6 @@
 [package]
 name = "borc"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "CBOR done right"
 repository = "https://github.com/na-sa-do/borc"
@@ -9,5 +9,6 @@ keywords = ["cbor"]
 categories = ["encoding"]
 
 [dependencies]
+chrono = { version = "0.4.22", optional = true }
 half = "2.1.0"
 thiserror = "1.0.31"

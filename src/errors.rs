@@ -15,6 +15,11 @@ pub enum DecodeError {
 	InvalidUtf8(#[from] FromUtf8Error),
 	#[error("{0}")]
 	IoError(#[from] std::io::Error),
+	#[error("got invalid value for an item tagged {0}")]
+	TagInvalid(u64),
+	#[cfg(feature = "chrono")]
+	#[error("error parsing date/time")]
+	InvalidDateTime(#[from] chrono::format::ParseError),
 }
 
 /// Errors that can occur when encoding CBOR.
