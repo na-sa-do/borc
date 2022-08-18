@@ -4,17 +4,15 @@
 //! The CBOR encoder and decoder are in [`streaming`], like the [`basic`](`crate::basic`) API.
 //!
 //! At the moment, one extension is implemented:
-//! dates and times using the `chrono` crate.
+//! dates and times using the `chrono` crate (requires the `chrono` feature).
 //!
-//! (We can't link to other crates here if they may or may not be compiled in,
-//! because if they aren't rustdoc gets confused.)
+//! (We can't link to other crates here if they may or may not be compiled in, because if they aren't rustdoc gets confused.)
 
 pub mod streaming;
 
 /// How to decode datetimes.
 ///
-/// This type is used instead of a simple boolean
-/// so that we can add support for other timekeeping libraries in the future, should we want to.
+/// This type is used instead of a simple boolean so that we can add support for other timekeeping libraries in the future.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DateTimeDecodeStyle {
