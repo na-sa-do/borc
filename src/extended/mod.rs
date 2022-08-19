@@ -10,6 +10,53 @@
 
 pub mod streaming;
 
+macro_rules! config_accessors {
+	($field:ident, $type:ty, $getter:ident, $mut_getter:ident, $setter:ident) => {
+		pub fn $getter(&self) -> &$type {
+			&self.$field
+		}
+
+		pub fn $mut_getter(&mut self) -> &mut $type {
+			&mut self.$field
+		}
+
+		pub fn $setter(&mut self, value: $type) -> &mut Self {
+			self.$field = value;
+			self
+		}
+	};
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DecodeExtensionConfig {
+	date_time_style: DateTimeDecodeStyle,
+}
+
+impl DecodeExtensionConfig {
+	config_accessors!(
+		date_time_style,
+		DateTimeDecodeStyle,
+		date_time_style,
+		date_time_style_mut,
+		set_date_time_style
+	);
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EncodeExtensionConfig {
+	date_time_style: DateTimeEncodeStyle,
+}
+
+impl EncodeExtensionConfig {
+	config_accessors!(
+		date_time_style,
+		DateTimeEncodeStyle,
+		date_time_style,
+		date_time_style_mut,
+		set_date_time_style
+	);
+}
+
 /// How to decode datetimes.
 ///
 /// This type is used instead of a simple boolean so that we can add support for other timekeeping libraries in the future.

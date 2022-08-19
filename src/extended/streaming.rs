@@ -18,6 +18,8 @@ use std::{
 #[cfg(feature = "chrono")]
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 
+use super::{DecodeExtensionConfig, EncodeExtensionConfig};
+
 /// An event encountered while decoding or encoding CBOR using a streaming extended implementation.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -148,45 +150,29 @@ impl Event<'_> {
 	}
 }
 
-#[allow(unused_macros)]
-macro_rules! config_accessors {
-	($field:ident, $type:ty, $getter:ident, $mut_getter:ident, $setter:ident) => {
-		pub fn $getter(&self) -> &$type {
-			&self.$field
-		}
-
-		pub fn $mut_getter(&mut self) -> &mut $type {
-			&mut self.$field
-		}
-
-		pub fn $setter(&mut self, value: $type) -> &mut Self {
-			self.$field = value;
-			self
-		}
-	};
-}
-
 /// A streaming decoder for CBOR with extensions.
 #[derive(Debug, Clone)]
 pub struct Decoder<T: Read> {
 	basic: BasicDecoder<T>,
-	date_time_style: DateTimeDecodeStyle,
+	config: DecodeExtensionConfig,
 }
 
+include!("forward_config_accessors.in.rs");
+
 impl<T: Read> Decoder<T> {
+	pub(crate) fn new_from_config(basic: BasicDecoder<T>, config: DecodeExtensionConfig) -> Self {
+		Self { basic, config }
+	}
+
 	pub fn new_from_basic_decoder(basic: BasicDecoder<T>) -> Self {
-		Self {
-			basic,
-			date_time_style: Default::default(),
-		}
+		Self::new_from_config(basic, Default::default())
 	}
 
 	pub fn new(source: T) -> Self {
 		Self::new_from_basic_decoder(BasicDecoder::new(source))
 	}
 
-	config_accessors!(
-		date_time_style,
+	forward_config_accessors!(
 		DateTimeDecodeStyle,
 		date_time_style,
 		date_time_style_mut,
@@ -219,7 +205,7 @@ impl<T: Read> Decoder<T> {
 			BasicEvent::Break => Event::Break,
 
 			BasicEvent::Tag(tag) => match tag {
-				0 => match self.date_time_style {
+				0 => match self.config.date_time_style {
 					DateTimeStyle::None => Event::UnrecognizedTag(0),
 					#[cfg(feature = "chrono")]
 					DateTimeStyle::Chrono => match self.basic.next_event()? {
@@ -229,7 +215,7 @@ impl<T: Read> Decoder<T> {
 						_ => return Err(DecodeError::TagInvalid(0)),
 					},
 				},
-				1 => match self.date_time_style {
+				1 => match self.config.date_time_style {
 					DateTimeStyle::None => Event::UnrecognizedTag(1),
 					#[cfg(feature = "chrono")]
 					DateTimeStyle::Chrono => match self.basic.next_event()? {
@@ -283,23 +269,23 @@ impl<T: Read> Decoder<T> {
 #[derive(Debug, Clone)]
 pub struct Encoder<T: Write> {
 	dest: BasicEncoder<T>,
-	date_time_style: DateTimeEncodeStyle,
+	config: EncodeExtensionConfig,
 }
 
 impl<T: Write> Encoder<T> {
+	fn new_from_config(dest: BasicEncoder<T>, config: EncodeExtensionConfig) -> Self {
+		Self { dest, config }
+	}
+
 	pub fn new_from_basic_encoder(dest: BasicEncoder<T>) -> Self {
-		Self {
-			dest,
-			date_time_style: Default::default(),
-		}
+		Self::new_from_config(dest, Default::default())
 	}
 
 	pub fn new(dest: T) -> Self {
 		Self::new_from_basic_encoder(BasicEncoder::new(dest))
 	}
 
-	config_accessors!(
-		date_time_style,
+	forward_config_accessors!(
 		DateTimeEncodeStyle,
 		date_time_style,
 		date_time_style_mut,
@@ -325,7 +311,7 @@ impl<T: Write> Encoder<T> {
 			Event::Break => BasicEvent::Break,
 
 			#[cfg(feature = "chrono")]
-			Event::ChronoDateTime(dt) => match self.date_time_style {
+			Event::ChronoDateTime(dt) => match self.config.date_time_style {
 				DateTimeEncodeStyle::PreferText => {
 					self.dest.feed_event(BasicEvent::Tag(0))?;
 					BasicEvent::TextString(Cow::Owned(
