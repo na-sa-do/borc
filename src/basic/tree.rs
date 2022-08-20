@@ -124,7 +124,7 @@ impl Decoder {
 				let mut buffer: Vec<u8>;
 				match decoder.next_event()? {
 					Event::ByteString(b) => buffer = b.into_owned(),
-					Event::Break => buffer = Vec::new(),
+					Event::Break => return Ok(Some(Item::ByteString(b"".to_vec()))),
 					_ => return Err(DecodeError::Malformed),
 				}
 				loop {
@@ -140,7 +140,7 @@ impl Decoder {
 				let mut buffer: String;
 				match decoder.next_event()? {
 					Event::TextString(b) => buffer = b.into_owned(),
-					Event::Break => buffer = String::new(),
+					Event::Break => return Ok(Some(Item::TextString("".to_owned()))),
 					_ => return Err(DecodeError::Malformed),
 				}
 				loop {
@@ -310,6 +310,7 @@ mod test {
 	#[test]
 	fn decode_bytes_segmented() {
 		decode_test!(b"\x5F\x42ab\x42cd\xFF" => Ok(Item::ByteString(b)) if b == b"abcd");
+		decode_test!(b"\x5F\xFF" => Ok(Item::ByteString(b)) if b == b"");
 	}
 
 	#[test]
@@ -320,6 +321,7 @@ mod test {
 	#[test]
 	fn decode_text_segmented() {
 		decode_test!(b"\x7F\x62ab\x62cd\xFF" => Ok(Item::TextString(t)) if t == "abcd");
+		decode_test!(b"\x7F\xFF" => Ok(Item::TextString(t)) if t == "");
 	}
 
 	#[test]
