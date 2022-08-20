@@ -1,21 +1,26 @@
-//! A tree-based implementation of the CBOR basic data model.
+//! A tree-based implementation of CBOR with extensions.
 //!
 //! This module parses CBOR into a large data structure which can be explored at will.
 //! It is much easier to use than a streaming implementation,
 //! but moderately less performant and with much higher memory requirements.
 //! It is comparable to DOM in the XML world.
 
-use crate::{
-	basic::streaming::{Decoder as StreamingDecoder, Encoder as StreamingEncoder, Event},
-	errors::{DecodeError, EncodeError},
+use super::{
+	streaming::{Decoder as StreamingDecoder, Encoder as StreamingEncoder, Event},
+	DateTimeDecodeStyle, DateTimeEncodeStyle, DecodeExtensionConfig, EncodeExtensionConfig,
 };
+use crate::errors::{DecodeError, EncodeError};
+#[cfg(feature = "chrono")]
+use chrono::{DateTime, FixedOffset};
 use std::{
 	borrow::Cow,
 	io::{Read, Write},
 };
 
-/// An item in the CBOR basic data model.
+/// An item in an extended CBOR data model.
+// TODO: implement tags with unknown semantics somehow
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Item {
 	/// An unsigned integer.
 	Unsigned(u64),
@@ -37,75 +42,94 @@ pub enum Item {
 	///
 	/// This uses a [`Vec`] as its actual implementation because [`Item`] can implement neither [`Ord`] nor [`Hash`] (nor even [`Eq`]).
 	Map(Vec<(Item, Item)>),
-	/// A tagged item.
-	Tag(u64, Box<Item>),
+	/// A tagged item whose semantics are unknown.
+	UnrecognizedTag(u64, Box<Item>),
 	/// A CBOR simple value.
 	Simple(u8),
+
+	/// A date/time.
+	///
+	/// This corresponds to tags 0 and 1.
+	///  and only appears if the [`Decoder::date_time_style`] extension is set to [`Chrono`](`DateTimeDecodeStyle::Chrono`).
+	#[cfg(feature = "chrono")]
+	ChronoDateTime(DateTime<FixedOffset>),
 }
 
 impl Item {
 	/// Interpret a [`Item::Signed`] value.
 	///
-	/// This is a convenience alias for [`super::streaming::Event::interpret_signed`].
+	/// This is a convenience alias for [`crate::basic::streaming::Event::interpret_signed`].
 	pub fn interpret_signed(val: u64) -> i64 {
-		super::streaming::Event::interpret_signed(val)
+		Event::interpret_signed(val)
 	}
 
 	/// Interpret a [`Item::Signed`] value.
 	///
-	/// This is a convenience alias for [`super::streaming::Event::interpret_signed_checked`].
+	/// This is a convenience alias for [`crate::basic::streaming::Event::interpret_signed_checked`].
 	pub fn interpret_signed_checked(val: u64) -> Option<i64> {
-		super::streaming::Event::interpret_signed_checked(val)
+		Event::interpret_signed_checked(val)
 	}
 
 	/// Interpret a [`Item::Signed`] value.
 	///
-	/// This is a convenience alias for [`super::streaming::Event::interpret_signed_wide`].
+	/// This is a convenience alias for [`crate::basic::streaming::Event::interpret_signed_wide`].
 	pub fn interpret_signed_wide(val: u64) -> i128 {
-		super::streaming::Event::interpret_signed_wide(val)
+		Event::interpret_signed_wide(val)
 	}
 
 	/// Create a [`Item::Signed`] or [`Item::Unsigned`] value.
 	///
-	/// This is a convenience alias for [`super::streaming::Event::create_signed`],
-	/// except that it returns an [`Item`] instead.
+	/// This is a convenience alias for [`crate::basic::streaming::Event::create_signed`],
+	/// except that it returns an extended [`Item`] instead.
 	pub fn create_signed(val: i64) -> Item {
-		match super::streaming::Event::create_signed(val) {
-			super::streaming::Event::Unsigned(n) => Self::Unsigned(n),
-			super::streaming::Event::Signed(n) => Self::Signed(n),
+		match Event::create_signed(val) {
+			Event::Unsigned(n) => Self::Unsigned(n),
+			Event::Signed(n) => Self::Signed(n),
 			_ => unreachable!(),
 		}
 	}
 
 	/// Create a [`Item::Signed`] or [`Item::Unsigned`] value.
 	///
-	/// This is a convenience alias for [`super::streaming::Event::create_signed_wide`],
-	/// except that it returns an [`Item`] instead.
+	/// This is a convenience alias for [`crate::basic::streaming::Event::create_signed_wide`],
+	/// except that it returns an extended [`Item`] instead.
 	pub fn create_signed_wide(val: i128) -> Option<Item> {
-		match super::streaming::Event::create_signed_wide(val) {
-			Some(super::streaming::Event::Unsigned(n)) => Some(Self::Unsigned(n)),
-			Some(super::streaming::Event::Signed(n)) => Some(Self::Signed(n)),
+		match Event::create_signed_wide(val) {
+			Some(Event::Unsigned(n)) => Some(Self::Unsigned(n)),
+			Some(Event::Signed(n)) => Some(Self::Signed(n)),
 			Some(_) => unreachable!(),
 			None => None,
 		}
 	}
 }
 
-/// A tree-building decoder for the CBOR basic data model.
+include!("forward_config_accessors.in.rs");
+
+/// A tree-building decoder for CBOR with extensions.
 #[derive(Debug, Clone, Default)]
-pub struct Decoder {}
+pub struct Decoder {
+	config: DecodeExtensionConfig,
+}
 
 impl Decoder {
 	pub fn new() -> Self {
 		Default::default()
 	}
 
+	forward_config_accessors!(
+		DateTimeDecodeStyle,
+		date_time_style,
+		date_time_style_mut,
+		set_date_time_style,
+		"the way date-times are decoded."
+	);
+
 	/// Parse some CBOR.
 	///
 	/// This is just a shortcut for [`Self::decode_from_stream`]
 	/// which constructs the [`streaming::Decoder`](`StreamingDecoder`) for you
 	/// and converts [`None`]s into [`DecodeError::Malformed`]s.
-	pub fn decode(self, source: impl Read) -> Result<Item, DecodeError> {
+	pub fn decode(&mut self, source: impl Read) -> Result<Item, DecodeError> {
 		match self.decode_from_stream(&mut StreamingDecoder::new(source)) {
 			Ok(Some(item)) => Ok(item),
 			Ok(None) => Err(DecodeError::Malformed),
@@ -119,13 +143,13 @@ impl Decoder {
 	/// This may or may not be acceptable depending on the situation,
 	/// so `decode_from_stream` doesn't count it as a failure.
 	pub fn decode_from_stream(
-		&self,
+		&mut self,
 		decoder: &mut StreamingDecoder<impl Read>,
 	) -> Result<Option<Item>, DecodeError> {
 		Ok(Some(match decoder.next_event()? {
-			Event::Unsigned(val) => Item::Unsigned(val),
-			Event::Signed(val) => Item::Signed(val),
-			Event::ByteString(val) => Item::ByteString(val.into_owned()),
+			Event::Unsigned(n) => Item::Unsigned(n),
+			Event::Signed(n) => Item::Signed(n),
+			Event::ByteString(b) => Item::ByteString(b.into_owned()),
 			Event::UnknownLengthByteString => {
 				let mut buffer: Vec<u8>;
 				match decoder.next_event()? {
@@ -214,37 +238,50 @@ impl Decoder {
 				}
 				Item::Map(map)
 			}
-			Event::Tag(tag) => match self.decode_from_stream(decoder) {
-				Ok(Some(value)) => Item::Tag(tag, Box::new(value)),
+			Event::UnrecognizedTag(tag) => match self.decode_from_stream(decoder) {
+				Ok(Some(value)) => Item::UnrecognizedTag(tag, Box::new(value)),
 				Ok(None) => return Err(DecodeError::Malformed),
 				Err(e) => return Err(e),
 			},
 			Event::Simple(val) => Item::Simple(val),
 			Event::Float(val) => Item::Float(val),
 			Event::Break => return Ok(None),
+
+			#[cfg(feature = "chrono")]
+			Event::ChronoDateTime(dt) => Item::ChronoDateTime(dt),
 		}))
 	}
 }
 
-#[derive(Debug, Clone)]
-/// A tree-walking encoder for the CBOR basic data model.
-pub struct Encoder {}
+/// A tree-walking encoder for CBOR with extensions.
+#[derive(Debug, Clone, Default)]
+pub struct Encoder {
+	config: EncodeExtensionConfig,
+}
 
 impl Encoder {
 	pub fn new() -> Self {
-		Self {}
+		Default::default()
 	}
+
+	forward_config_accessors!(
+		DateTimeEncodeStyle,
+		date_time_style,
+		date_time_style_mut,
+		set_date_time_style,
+		"the way date-times are encoded."
+	);
 
 	/// Encode some CBOR.
 	///
 	/// This is just a shortcut for [`Self::encode_to_stream`] which constructs the [`streaming::Encoder`](`crate::basic::streaming::Encoder`) for you.
-	pub fn encode(&self, cbor: &Item, dest: impl Write) -> Result<(), EncodeError> {
+	pub fn encode(&mut self, cbor: &Item, dest: impl Write) -> Result<(), EncodeError> {
 		self.encode_to_stream(cbor, &mut StreamingEncoder::new(dest))
 	}
 
 	/// Encode some CBOR to a provided streaming encoder.
 	pub fn encode_to_stream(
-		&self,
+		&mut self,
 		cbor: &Item,
 		encoder: &mut StreamingEncoder<impl Write>,
 	) -> Result<(), EncodeError> {
@@ -275,11 +312,14 @@ impl Encoder {
 				}
 				Ok(())
 			}
-			Item::Tag(tag, val) => {
-				encoder.feed_event(Event::Tag(*tag))?;
+			Item::UnrecognizedTag(tag, val) => {
+				encoder.feed_event(Event::UnrecognizedTag(*tag))?;
 				self.encode_to_stream(val, encoder)
 			}
 			Item::Simple(n) => encoder.feed_event(Event::Simple(*n)),
+
+			#[cfg(feature = "chrono")]
+			Item::ChronoDateTime(dt) => encoder.feed_event(Event::ChronoDateTime(*dt)),
 		}
 	}
 }
@@ -287,11 +327,12 @@ impl Encoder {
 #[cfg(test)]
 mod test {
 	use super::*;
+	use std::io::Cursor;
 
 	macro_rules! decode_test {
 		($in:expr => $out:pat if $guard:expr) => {
 			let input = $in;
-			match Decoder::new().decode(std::io::Cursor::new(&input)) {
+			match Decoder::new().decode(Cursor::new(&input)) {
 				$out if $guard => (),
 				other => panic!("{:X?} => {:?}", input, other),
 			}
@@ -307,7 +348,7 @@ mod test {
 			let output = $out;
 			let mut buf = Vec::with_capacity(output.len());
 			Encoder::new()
-				.encode(&input, std::io::Cursor::new(&mut buf))
+				.encode(&input, Cursor::new(&mut buf))
 				.unwrap();
 			assert_eq!(buf, output, "{:?} => {:X?}", input, buf);
 		};
@@ -385,21 +426,5 @@ mod test {
 			])
 			=> b"\xA2\x00\x01\x02\x03"
 		);
-	}
-
-	#[test]
-	fn decode_tag() {
-		decode_test!(b"\xC1\x00" => Ok(Item::Tag(1, sub)) if matches!(*sub, Item::Unsigned(0)));
-	}
-
-	#[test]
-	fn decode_tag_wrong() {
-		decode_test!(b"\xC1" => Err(DecodeError::Insufficient));
-		decode_test!(b"\xC1\xFF" => Err(DecodeError::Malformed));
-	}
-
-	#[test]
-	fn encode_tag() {
-		encode_test!(Item::Tag(1, Box::new(Item::Unsigned(0))) => b"\xC1\x00");
 	}
 }
