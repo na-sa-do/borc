@@ -64,6 +64,70 @@ impl<T: Read> Decoder<T> {
 		}
 	}
 
+	// Read a byte string, which may be unknown-length; non-byte-strings are malformed.
+	// This is a convenience function for the extended decoders.
+	pub(crate) fn read_byte_string(&mut self) -> Result<Cow<[u8]>, DecodeError> {
+		match self.next_event()?.to_owned() {
+			Event::ByteString(b) => Ok(Cow::Owned(b.into_owned())),
+			Event::UnknownLengthByteString => self.read_unknown_length_byte_string_body(),
+			_ => Err(DecodeError::Malformed),
+		}
+	}
+
+	// Read the body of an unknown-length byte string.
+	// This is a convenience function for the extended decoders.
+	pub(crate) fn read_unknown_length_byte_string_body(
+		&mut self,
+	) -> Result<Cow<[u8]>, DecodeError> {
+		let mut buffer: Vec<u8>;
+		match self.next_event()? {
+			Event::ByteString(b) => buffer = b.into_owned(),
+			Event::Break => return Ok(Cow::Owned(b"".to_vec())),
+			_ => return Err(DecodeError::Malformed),
+		}
+		loop {
+			match self.next_event()? {
+				Event::ByteString(b) => buffer.extend_from_slice(&b),
+				Event::Break => return Ok(Cow::Owned(buffer)),
+				_ => return Err(DecodeError::Malformed),
+			}
+		}
+	}
+
+	// Read a text string, which may be unknown-length; non-byte-strings are malformed.
+	// This is a convenience function for the extended decoders.
+	pub(crate) fn read_text_string(&mut self) -> Result<Cow<str>, DecodeError> {
+		match self.next_event()?.to_owned() {
+			Event::TextString(t) => Ok(Cow::Owned(t.into_owned())),
+			Event::UnknownLengthTextString => self.read_unknown_length_text_string_body(),
+			_ => Err(DecodeError::Malformed),
+		}
+	}
+
+	// Read the body of an unknown-length text string.
+	// This is a convenience function for the extended decoders.
+	pub(crate) fn read_unknown_length_text_string_body(&mut self) -> Result<Cow<str>, DecodeError> {
+		let mut buffer: String;
+		match self.next_event()? {
+			Event::TextString(b) => buffer = b.into_owned(),
+			Event::Break => return Ok(Cow::Owned("".to_owned())),
+			_ => return Err(DecodeError::Malformed),
+		}
+		loop {
+			match self.next_event()? {
+				Event::TextString(b) => {
+					let mut buffer2 = buffer.into_bytes();
+					buffer2.extend_from_slice(b.as_bytes());
+					// Safe because they were strings just a moment ago.
+					// Concatenating UTF-8 strings always produces valid UTF-8.
+					buffer = unsafe { String::from_utf8_unchecked(buffer2) };
+				}
+				Event::Break => return Ok(Cow::Owned(buffer)),
+				_ => return Err(DecodeError::Malformed),
+			}
+		}
+	}
+
 	/// Pull an event from the decoder.
 	///
 	/// Note that the resulting event does not, at present, actually borrow the decoder.

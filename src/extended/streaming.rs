@@ -180,6 +180,32 @@ impl<T: Read> Decoder<T> {
 		"the way date-times are decoded."
 	);
 
+	// Read a byte string, which may be unknown-length; non-byte-strings are malformed.
+	// This is a convenience function for the extended decoders.
+	pub(crate) fn read_byte_string(&mut self) -> Result<Cow<[u8]>, DecodeError> {
+		self.basic.read_byte_string()
+	}
+
+	// Read the body of an unknown-length byte string.
+	// This is a convenience function for the extended decoders.
+	pub(crate) fn read_unknown_length_byte_string_body(
+		&mut self,
+	) -> Result<Cow<[u8]>, DecodeError> {
+		self.basic.read_unknown_length_byte_string_body()
+	}
+
+	// Read a text string, which may be unknown-length; non-text-strings are malformed.
+	// This is a convenience function for the extended decoders.
+	pub(crate) fn read_text_string(&mut self) -> Result<Cow<str>, DecodeError> {
+		self.basic.read_text_string()
+	}
+
+	// Read the body of an unknown-length text string.
+	// This is a convenience function for the extended decoders.
+	pub(crate) fn read_unknown_length_text_string_body(&mut self) -> Result<Cow<str>, DecodeError> {
+		self.basic.read_unknown_length_text_string_body()
+	}
+
 	/// Pull an event from the decoder.
 	///
 	/// Note that the resulting event does not, at present, actually borrow the decoder.
@@ -209,11 +235,10 @@ impl<T: Read> Decoder<T> {
 				0 => match self.config.date_time_style {
 					DateTimeStyle::None => Event::UnrecognizedTag(0),
 					#[cfg(feature = "chrono")]
-					DateTimeStyle::Chrono => match self.basic.next_event()? {
-						BasicEvent::TextString(t) => {
-							Event::ChronoDateTime(DateTime::parse_from_rfc3339(&t)?)
-						}
-						_ => return Err(DecodeError::TagInvalid(0)),
+					DateTimeStyle::Chrono => match self.read_text_string() {
+						Ok(t) => Event::ChronoDateTime(DateTime::parse_from_rfc3339(&t)?),
+						Err(DecodeError::Malformed) => return Err(DecodeError::TagInvalid(0)),
+						Err(e) => return Err(e),
 					},
 				},
 				1 => match self.config.date_time_style {
@@ -353,6 +378,18 @@ mod test {
 	fn decode_chrono_text_datetime() {
 		assert_eq!(
 			Decoder::new(Cursor::new(b"\xC0\x741990-12-31T12:34:56Z"))
+				.set_date_time_style(crate::extended::DateTimeDecodeStyle::Chrono)
+				.next_event()
+				.unwrap(),
+			Event::ChronoDateTime(Utc.ymd(1990, 12, 31).and_hms(12, 34, 56).into())
+		);
+	}
+
+	#[cfg(feature = "chrono")]
+	#[test]
+	fn decode_chrono_text_datetime_unknown_length() {
+		assert_eq!(
+			Decoder::new(Cursor::new(b"\xC0\x7F\x741990-12-31T12:34:56Z\xFF"))
 				.set_date_time_style(crate::extended::DateTimeDecodeStyle::Chrono)
 				.next_event()
 				.unwrap(),

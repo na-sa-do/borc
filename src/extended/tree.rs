@@ -151,41 +151,11 @@ impl Decoder {
 			Event::Signed(n) => Item::Signed(n),
 			Event::ByteString(b) => Item::ByteString(b.into_owned()),
 			Event::UnknownLengthByteString => {
-				let mut buffer: Vec<u8>;
-				match decoder.next_event()? {
-					Event::ByteString(b) => buffer = b.into_owned(),
-					Event::Break => return Ok(Some(Item::ByteString(b"".to_vec()))),
-					_ => return Err(DecodeError::Malformed),
-				}
-				loop {
-					match decoder.next_event()? {
-						Event::ByteString(b) => buffer.extend_from_slice(&b),
-						Event::Break => return Ok(Some(Item::ByteString(buffer))),
-						_ => return Err(DecodeError::Malformed),
-					}
-				}
+				Item::ByteString(decoder.read_unknown_length_byte_string_body()?.into_owned())
 			}
 			Event::TextString(val) => Item::TextString(val.into_owned()),
 			Event::UnknownLengthTextString => {
-				let mut buffer: String;
-				match decoder.next_event()? {
-					Event::TextString(b) => buffer = b.into_owned(),
-					Event::Break => return Ok(Some(Item::TextString("".to_owned()))),
-					_ => return Err(DecodeError::Malformed),
-				}
-				loop {
-					match decoder.next_event()? {
-						Event::TextString(b) => {
-							let mut buffer2 = buffer.into_bytes();
-							buffer2.extend_from_slice(b.as_bytes());
-							// Safe because they were strings just a moment ago.
-							// Concatenating UTF-8 strings always produces valid UTF-8.
-							buffer = unsafe { String::from_utf8_unchecked(buffer2) };
-						}
-						Event::Break => return Ok(Some(Item::TextString(buffer))),
-						_ => return Err(DecodeError::Malformed),
-					}
-				}
+				Item::TextString(decoder.read_unknown_length_text_string_body()?.into_owned())
 			}
 			Event::Array(len) => {
 				let mut arr = Vec::with_capacity(len.try_into().unwrap_or(usize::MAX));
