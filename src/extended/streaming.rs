@@ -176,7 +176,8 @@ impl<T: Read> Decoder<T> {
 		DateTimeDecodeStyle,
 		date_time_style,
 		date_time_style_mut,
-		set_date_time_style
+		set_date_time_style,
+		"the way date-times are decoded."
 	);
 
 	/// Pull an event from the decoder.
@@ -289,7 +290,8 @@ impl<T: Write> Encoder<T> {
 		DateTimeEncodeStyle,
 		date_time_style,
 		date_time_style_mut,
-		set_date_time_style
+		set_date_time_style,
+		"the way date-times are encoded."
 	);
 
 	/// Feed an event to the encoder.

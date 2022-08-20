@@ -120,12 +120,15 @@ impl Decoder {
 		DateTimeDecodeStyle,
 		date_time_style,
 		date_time_style_mut,
-		set_date_time_style
+		set_date_time_style,
+		"the way date-times are decoded."
 	);
 
 	/// Parse some CBOR.
 	///
-	/// This is just a shortcut for [`Self::decode_from_stream`] which constructs the [`streaming::Decoder`](`StreamingDecoder`) for you.
+	/// This is just a shortcut for [`Self::decode_from_stream`]
+	/// which constructs the [`streaming::Decoder`](`StreamingDecoder`) for you
+	/// and converts [`None`]s into [`DecodeError::Malformed`]s.
 	pub fn decode(&mut self, source: impl Read) -> Result<Item, DecodeError> {
 		match self.decode_from_stream(&mut StreamingDecoder::new(source)) {
 			Ok(Some(item)) => Ok(item),
@@ -135,6 +138,10 @@ impl Decoder {
 	}
 
 	/// Parse some CBOR from a provided streaming decoder.
+	///
+	/// If this returns `Ok(None)`, it means that the first thing it encountered was a break (`0xFF`).
+	/// This may or may not be acceptable depending on the situation,
+	/// so `decode_from_stream` doesn't count it as a failure.
 	pub fn decode_from_stream(
 		&mut self,
 		decoder: &mut StreamingDecoder<impl Read>,
@@ -261,7 +268,8 @@ impl Encoder {
 		DateTimeEncodeStyle,
 		date_time_style,
 		date_time_style_mut,
-		set_date_time_style
+		set_date_time_style,
+		"the way date-times are encoded."
 	);
 
 	/// Encode some CBOR.
