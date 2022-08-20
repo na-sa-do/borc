@@ -342,6 +342,7 @@ impl<T: Write> Encoder<T> {
 #[allow(unused)]
 mod test {
 	use super::*;
+	#[cfg(feature = "chrono")]
 	use chrono::{TimeZone, Utc};
 	use std::io::Cursor;
 
