@@ -6,13 +6,16 @@
 //! It is comparable to DOM in the XML world.
 
 use super::{
-	streaming::{Decoder as StreamingDecoder, Event},
-	DateTimeDecodeStyle, DecodeExtensionConfig,
+	streaming::{Decoder as StreamingDecoder, Encoder as StreamingEncoder, Event},
+	DateTimeDecodeStyle, DateTimeEncodeStyle, DecodeExtensionConfig, EncodeExtensionConfig,
 };
-use crate::errors::DecodeError;
+use crate::errors::{DecodeError, EncodeError};
 #[cfg(feature = "chrono")]
 use chrono::{DateTime, FixedOffset};
-use std::io::Read;
+use std::{
+	borrow::Cow,
+	io::{Read, Write},
+};
 
 /// An item in an extended CBOR data model.
 // TODO: implement tags with unknown semantics somehow
@@ -240,5 +243,75 @@ impl Decoder {
 			#[cfg(feature = "chrono")]
 			Event::ChronoDateTime(dt) => Item::ChronoDateTime(dt),
 		}))
+	}
+}
+
+/// A tree-walking encoder for CBOR with extensions.
+#[derive(Debug, Clone, Default)]
+pub struct Encoder {
+	config: EncodeExtensionConfig,
+}
+
+impl Encoder {
+	pub fn new() -> Self {
+		Default::default()
+	}
+
+	forward_config_accessors!(
+		DateTimeEncodeStyle,
+		date_time_style,
+		date_time_style_mut,
+		set_date_time_style
+	);
+
+	/// Encode some CBOR.
+	///
+	/// This is just a shortcut for [`Self::encode_to_stream`] which constructs the [`streaming::Encoder`](`crate::basic::streaming::Encoder`) for you.
+	pub fn encode(&mut self, cbor: &Item, dest: impl Write) -> Result<(), EncodeError> {
+		self.encode_to_stream(cbor, &mut StreamingEncoder::new(dest))
+	}
+
+	/// Encode some CBOR to a provided streaming encoder.
+	pub fn encode_to_stream(
+		&mut self,
+		cbor: &Item,
+		encoder: &mut StreamingEncoder<impl Write>,
+	) -> Result<(), EncodeError> {
+		match cbor {
+			Item::Unsigned(n) => encoder.feed_event(Event::Unsigned(*n)),
+			Item::Signed(n) => encoder.feed_event(Event::Signed(*n)),
+			Item::Float(f) => encoder.feed_event(Event::Float(*f)),
+			Item::ByteString(bytes) => {
+				encoder.feed_event(Event::ByteString(Cow::Borrowed(&*bytes)))
+			}
+			Item::TextString(text) => encoder.feed_event(Event::TextString(Cow::Borrowed(&*text))),
+			Item::Array(arr) => {
+				encoder.feed_event(Event::Array(
+					arr.len().try_into().expect("I'm on a 128-bit system? Wow."),
+				))?;
+				for item in arr.iter() {
+					self.encode_to_stream(item, encoder)?;
+				}
+				Ok(())
+			}
+			Item::Map(map) => {
+				encoder.feed_event(Event::Map(
+					map.len().try_into().expect("I'm on a 128-bit system? Wow."),
+				))?;
+				for (key, val) in map.iter() {
+					self.encode_to_stream(key, encoder)?;
+					self.encode_to_stream(val, encoder)?;
+				}
+				Ok(())
+			}
+			Item::UnrecognizedTag(tag, val) => {
+				encoder.feed_event(Event::UnrecognizedTag(*tag))?;
+				self.encode_to_stream(val, encoder)
+			}
+			Item::Simple(n) => encoder.feed_event(Event::Simple(*n)),
+
+			#[cfg(feature = "chrono")]
+			Item::ChronoDateTime(dt) => encoder.feed_event(Event::ChronoDateTime(*dt)),
+		}
 	}
 }
