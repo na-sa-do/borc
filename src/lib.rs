@@ -11,8 +11,7 @@
 //! - [`basic::streaming`], a streaming encoder/decoder pair that is lightweight but tricky to use
 //! - [`basic::tree`], a tree-based encoder/decoder pair that is easier to use but holds the entire CBOR structure in memory at once
 //! - [`extended::streaming`], a streaming encoder/decoder pair with special handling of some tags
-//!
-//! The obviously missing `extended::tree` is not yet implemented.
+//! - [`extended::tree`], a tree-based encoder/decoder pair with special handling of some tags
 //!
 //! For details on the extensions currently implemented, check the documentation for the [`extended`] module.
 

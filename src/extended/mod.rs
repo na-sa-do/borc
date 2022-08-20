@@ -9,6 +9,7 @@
 //! (We can't link to other crates here if they may or may not be compiled in, because if they aren't rustdoc gets confused.)
 
 pub mod streaming;
+pub mod tree;
 
 macro_rules! config_accessors {
 	($field:ident, $type:ty, $getter:ident, $mut_getter:ident, $setter:ident) => {
