@@ -4,7 +4,7 @@ borc is an implementation of [CBOR, the Concise Binary Object Representation](ht
 
 ## Status
 
-At the moment, the basic streaming and tree-based encoders and decoders are implemented, as are the extended streaming encoder and decoder. I plan to write an extended tree-based implementation as well to complete the set.
+borc provides both the basic CBOR data model (without any special handling of tags) and an extended data model. Both models are provided in streaming and tree-based forms, akin to SAX and DOM in the XML world.
 
 The only extension implemented at this time is handling of date-times (CBOR tags 0 and 1) with `chrono`. Other extensions will follow.
 
