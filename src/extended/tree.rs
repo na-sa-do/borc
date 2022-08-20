@@ -315,3 +315,106 @@ impl Encoder {
 		}
 	}
 }
+
+#[cfg(test)]
+mod test {
+	use super::*;
+	use std::io::Cursor;
+
+	macro_rules! decode_test {
+		($in:expr => $out:pat if $guard:expr) => {
+			let input = $in;
+			match Decoder::new().decode(Cursor::new(&input)) {
+				$out if $guard => (),
+				other => panic!("{:X?} => {:?}", input, other),
+			}
+		};
+		($in:expr => $out:pat) => {
+			decode_test!($in => $out if true);
+		}
+	}
+
+	macro_rules! encode_test {
+		($in:expr => $out:expr) => {
+			let input = $in;
+			let output = $out;
+			let mut buf = Vec::with_capacity(output.len());
+			Encoder::new()
+				.encode(&input, Cursor::new(&mut buf))
+				.unwrap();
+			assert_eq!(buf, output, "{:?} => {:X?}", input, buf);
+		};
+	}
+
+	#[test]
+	fn decode_bytes_segmented() {
+		decode_test!(b"\x5F\x42ab\x42cd\xFF" => Ok(Item::ByteString(b)) if b == b"abcd");
+	}
+
+	#[test]
+	fn decode_bytes_segmented_wrong() {
+		decode_test!(b"\x5F\x00" => Err(DecodeError::Malformed));
+	}
+
+	#[test]
+	fn decode_text_segmented() {
+		decode_test!(b"\x7F\x62ab\x62cd\xFF" => Ok(Item::TextString(t)) if t == "abcd");
+	}
+
+	#[test]
+	fn decode_text_segmented_wrong() {
+		decode_test!(b"\x7F\x00" => Err(DecodeError::Malformed));
+	}
+
+	#[test]
+	fn decode_array() {
+		decode_test!(b"\x80" => Ok(Item::Array(v)) if v.is_empty());
+		decode_test!(b"\x84\x00\x01\x02\x03" => Ok(Item::Array(v)) if v == [0,1,2,3].map(|x| Item::Unsigned(x)));
+	}
+
+	#[test]
+	fn decode_array_segmented() {
+		decode_test!(b"\x9F\xFF" => Ok(Item::Array(v)) if v.is_empty());
+		decode_test!(b"\x9F\x00\x00\xFF" => Ok(Item::Array(v)) if v == vec![Item::Unsigned(0); 2]);
+	}
+
+	#[test]
+	fn encode_array() {
+		encode_test!(
+			Item::Array(vec![
+				Item::Unsigned(0),
+				Item::Unsigned(1),
+			])
+			=> b"\x82\x00\x01"
+		);
+	}
+
+	#[test]
+	fn decode_map() {
+		decode_test!(b"\xA0" => Ok(Item::Map(m)) if m.is_empty());
+		decode_test!(b"\xA1\x00\x01" => Ok(Item::Map(m)) if m == [(Item::Unsigned(0), Item::Unsigned(1))]);
+	}
+
+	#[test]
+	fn decode_map_segmented() {
+		decode_test!(b"\xBF\xFF" => Ok(Item::Map(m)) if m.is_empty());
+		decode_test!(b"\xBF\x00\x01\xFF" => Ok(Item::Map(m)) if m == [(Item::Unsigned(0), Item::Unsigned(1))]);
+	}
+
+	#[test]
+	fn decode_map_wrong() {
+		decode_test!(b"\xA1\x00" => Err(DecodeError::Insufficient));
+		decode_test!(b"\xBF\x00\xFF" => Err(DecodeError::Malformed));
+	}
+
+	#[test]
+	fn encode_map() {
+		encode_test!(
+			Item::Map(vec![
+				(Item::Unsigned(0), Item::Unsigned(1)),
+				(Item::Unsigned(2), Item::Unsigned(3)),
+			])
+			=> b"\xA2\x00\x01\x02\x03"
+		);
+	}
+}
