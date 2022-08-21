@@ -8,17 +8,21 @@
 use crate::{
 	basic::streaming::{Decoder as BasicDecoder, Encoder as BasicEncoder, Event as BasicEvent},
 	errors::{DecodeError, EncodeError},
-	extended::{DateTimeDecodeStyle, DateTimeEncodeStyle},
+	extended::{
+		BignumDecodeStyle, DateTimeDecodeStyle, DateTimeEncodeStyle, DecodeExtensionConfig,
+		EncodeExtensionConfig,
+	},
 };
 use std::{
 	borrow::Cow,
+	collections::VecDeque,
 	io::{Read, Write},
 };
 
 #[cfg(feature = "chrono")]
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
-
-use super::{DecodeExtensionConfig, EncodeExtensionConfig};
+#[cfg(feature = "num-bigint")]
+use num_bigint::BigInt;
 
 /// An event encountered while decoding or encoding CBOR using a streaming extended implementation.
 #[derive(Debug, Clone, PartialEq)]
@@ -74,9 +78,15 @@ pub enum Event<'a> {
 	/// A date/time.
 	///
 	/// This corresponds to tags 0 and 1.
-	///  and only appears if the [`Decoder::date_time_style`] extension is set to [`Chrono`](`DateTimeDecodeStyle::Chrono`).
+	/// and only appears if the [`Decoder::date_time_style`] extension is set to [`Chrono`](`DateTimeDecodeStyle::Chrono`).
 	#[cfg(feature = "chrono")]
 	ChronoDateTime(DateTime<FixedOffset>),
+	/// A non-negative bignum.
+	///
+	/// This corresponds to tags 2 and 3,
+	/// and only appears if the [`Decoder::bignum_style`] extension is set to [`Num`](`BignumDecodeStyle::Num`) or [`ForceNum`](`BignumDecodeStyle::ForceNum`).
+	#[cfg(feature = "num-bigint")]
+	NumBigInt(BigInt),
 }
 
 impl Event<'_> {
@@ -100,6 +110,8 @@ impl Event<'_> {
 
 			#[cfg(feature = "chrono")]
 			Self::ChronoDateTime(dt) => Event::ChronoDateTime(dt),
+			#[cfg(feature = "num-bigint")]
+			Self::NumBigInt(big) => Event::NumBigInt(big),
 		}
 	}
 
@@ -155,13 +167,19 @@ impl Event<'_> {
 pub struct Decoder<T: Read> {
 	basic: BasicDecoder<T>,
 	config: DecodeExtensionConfig,
+	// Queue of fake events to be returned before any more processing takes place.
+	queue: VecDeque<Event<'static>>,
 }
 
 include!("forward_config_accessors.in.rs");
 
 impl<T: Read> Decoder<T> {
 	pub(crate) fn new_from_config(basic: BasicDecoder<T>, config: DecodeExtensionConfig) -> Self {
-		Self { basic, config }
+		Self {
+			basic,
+			config,
+			queue: VecDeque::new(),
+		}
 	}
 
 	pub fn new_from_basic_decoder(basic: BasicDecoder<T>) -> Self {
@@ -178,6 +196,14 @@ impl<T: Read> Decoder<T> {
 		date_time_style_mut,
 		set_date_time_style,
 		"the way date-times are decoded."
+	);
+
+	forward_config_accessors!(
+		BignumDecodeStyle,
+		bignum_style,
+		bignum_style_mut,
+		set_bignum_style,
+		"the way bignums are decoded."
 	);
 
 	// Read a byte string, which may be unknown-length; non-byte-strings are malformed.
@@ -206,6 +232,55 @@ impl<T: Read> Decoder<T> {
 		self.basic.read_unknown_length_text_string_body()
 	}
 
+	fn do_bignum(&mut self, is_negative: bool) -> Result<Event, DecodeError> {
+		use BignumDecodeStyle as BignumStyle;
+
+		match self.config.bignum_style {
+			BignumStyle::Convert | BignumStyle::ForceConvert => {
+				let raw_bytes = self.read_byte_string()?.into_owned();
+				if raw_bytes.len() == 0 {
+					return Ok(Event::Unsigned(0));
+				}
+				let starting_idx = {
+					let mut starting_idx = raw_bytes.len() - 1;
+					for (idx, &byte) in raw_bytes.iter().enumerate() {
+						if byte != 0 {
+							starting_idx = idx;
+							break;
+						}
+					}
+					starting_idx
+				};
+				let real_bytes = &raw_bytes[starting_idx..];
+				if real_bytes.len() > std::mem::size_of::<u64>() {
+					match self.config.bignum_style {
+						BignumStyle::Convert => {
+							// this converts unknown-length byte strings to known-length ones, but oh well
+							self.queue
+								.push_back(Event::ByteString(Cow::Owned(raw_bytes)));
+							Ok(Event::UnrecognizedTag(if is_negative { 3 } else { 2 }))
+						}
+						BignumStyle::ForceConvert => return Err(DecodeError::OversizedBignum),
+						_ => unreachable!(),
+					}
+				} else {
+					let mut value = 0u64;
+					for byte in real_bytes.iter() {
+						value <<= 8;
+						value += *byte as u64;
+					}
+					if is_negative {
+						Ok(Event::Signed(value))
+					} else {
+						Ok(Event::Unsigned(value))
+					}
+				}
+			}
+			#[cfg(feature = "num-bigint")]
+			BignumStyle::Num => todo!(),
+		}
+	}
+
 	/// Pull an event from the decoder.
 	///
 	/// Note that the resulting event does not, at present, actually borrow the decoder.
@@ -214,6 +289,10 @@ impl<T: Read> Decoder<T> {
 	/// they are never borrowed in decoding, only in encoding.
 	/// However, `next_event` is typed as if it were zero-copy for forward compatibility.
 	pub fn next_event(&mut self) -> Result<Event, DecodeError> {
+		if let Some(event) = self.queue.pop_front() {
+			return Ok(event);
+		}
+
 		use DateTimeDecodeStyle as DateTimeStyle;
 
 		Ok(match self.basic.next_event()?.into_owned() {
@@ -263,6 +342,8 @@ impl<T: Read> Decoder<T> {
 						_ => return Err(DecodeError::TagInvalid(0)),
 					},
 				},
+				2 => self.do_bignum(false)?,
+				3 => self.do_bignum(true)?,
 				_ => Event::UnrecognizedTag(tag),
 			},
 		})
@@ -356,6 +437,8 @@ impl<T: Write> Encoder<T> {
 					}
 				}
 			},
+			#[cfg(feature = "num-bigint")]
+			Event::NumBigInt(_) => todo!(),
 		};
 		self.dest.feed_event(basic_event)
 	}
@@ -493,5 +576,32 @@ mod test {
 		assert!(enc.ready_to_finish());
 		drop(enc);
 		assert_eq!(&buf, b"\xC1\xF9\x38\x00");
+	}
+
+	#[test]
+	fn decode_bignum_convert() {
+		let mut decoder = Decoder::new(Cursor::new(b"\xC2\x40"));
+		assert_eq!(decoder.bignum_style(), &BignumDecodeStyle::Convert);
+		assert_eq!(decoder.next_event().unwrap(), Event::Unsigned(0));
+
+		let mut decoder = Decoder::new(Cursor::new(b"\xC2\x42\x01\x00"));
+		assert_eq!(decoder.next_event().unwrap(), Event::Unsigned(256));
+
+		let mut decoder = Decoder::new(Cursor::new(b"\xC2\x4A1234567890"));
+		assert_eq!(decoder.next_event().unwrap(), Event::UnrecognizedTag(2));
+		assert_eq!(
+			decoder.next_event().unwrap(),
+			Event::ByteString(Cow::Borrowed(b"1234567890"))
+		);
+	}
+
+	#[test]
+	fn decode_bignum_force_convert() {
+		let mut decoder = Decoder::new(Cursor::new(b"\xC2\x4A1234567890"));
+		decoder.set_bignum_style(BignumDecodeStyle::ForceConvert);
+		match decoder.next_event() {
+			Err(DecodeError::OversizedBignum) => (),
+			other => panic!("got {other:?}"),
+		}
 	}
 }

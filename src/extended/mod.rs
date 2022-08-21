@@ -31,6 +31,7 @@ macro_rules! config_accessors {
 #[derive(Debug, Clone, Default)]
 pub struct DecodeExtensionConfig {
 	date_time_style: DateTimeDecodeStyle,
+	bignum_style: BignumDecodeStyle,
 }
 
 impl DecodeExtensionConfig {
@@ -40,6 +41,14 @@ impl DecodeExtensionConfig {
 		date_time_style,
 		date_time_style_mut,
 		set_date_time_style
+	);
+
+	config_accessors!(
+		bignum_style,
+		BignumDecodeStyle,
+		bignum_style,
+		bignum_style_mut,
+		set_bignum_style
 	);
 }
 
@@ -98,5 +107,27 @@ impl Default for DateTimeEncodeStyle {
 	/// borc uses textual datetime encoding by default because it handles dates before the UNIX epoch more robustly.
 	fn default() -> Self {
 		Self::PreferText
+	}
+}
+
+/// How to decode bignums.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BignumDecodeStyle {
+	/// Try to decode bignums as regular integers.
+	///
+	/// A bignum which does not fit in a regular CBOR integer will be treated as if the tag were unrecognized.
+	Convert,
+	/// Decode bignums as regular integers, erroring if they are too big.
+	ForceConvert,
+	/// Use [`num_bigint`] to decode bignums if they are too big to fit in regular integers.
+	#[cfg(feature = "num-bigint")]
+	Num,
+}
+
+impl Default for BignumDecodeStyle {
+	/// Return [`Self::Convert`].
+	fn default() -> Self {
+		Self::Convert
 	}
 }

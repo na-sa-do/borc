@@ -20,6 +20,8 @@ pub enum DecodeError {
 	#[cfg(feature = "chrono")]
 	#[error("error parsing date/time")]
 	InvalidDateTime(#[from] chrono::format::ParseError),
+	#[error("oversized bignum")]
+	OversizedBignum,
 }
 
 /// Errors that can occur when encoding CBOR.

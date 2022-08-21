@@ -219,6 +219,8 @@ impl Decoder {
 
 			#[cfg(feature = "chrono")]
 			Event::ChronoDateTime(dt) => Item::ChronoDateTime(dt),
+			#[cfg(feature = "num-bigint")]
+			Event::NumBigInt(_) => todo!(),
 		}))
 	}
 }
