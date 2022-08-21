@@ -233,51 +233,56 @@ impl<T: Read> Decoder<T> {
 	}
 
 	fn do_bignum(&mut self, is_negative: bool) -> Result<Event, DecodeError> {
+		use crate::read_ints::*;
 		use BignumDecodeStyle as BignumStyle;
 
-		match self.config.bignum_style {
-			BignumStyle::Convert | BignumStyle::ForceConvert => {
-				let raw_bytes = self.read_byte_string()?.into_owned();
-				if raw_bytes.len() == 0 {
-					return Ok(Event::Unsigned(0));
-				}
-				let starting_idx = {
-					let mut starting_idx = raw_bytes.len() - 1;
-					for (idx, &byte) in raw_bytes.iter().enumerate() {
-						if byte != 0 {
-							starting_idx = idx;
-							break;
-						}
-					}
-					starting_idx
-				};
-				let real_bytes = &raw_bytes[starting_idx..];
-				if real_bytes.len() > std::mem::size_of::<u64>() {
-					match self.config.bignum_style {
-						BignumStyle::Convert => {
-							// this converts unknown-length byte strings to known-length ones, but oh well
-							self.queue
-								.push_back(Event::ByteString(Cow::Owned(raw_bytes)));
-							Ok(Event::UnrecognizedTag(if is_negative { 3 } else { 2 }))
-						}
-						BignumStyle::ForceConvert => return Err(DecodeError::OversizedBignum),
-						_ => unreachable!(),
-					}
-				} else {
-					let mut value = 0u64;
-					for byte in real_bytes.iter() {
-						value <<= 8;
-						value += *byte as u64;
-					}
-					if is_negative {
-						Ok(Event::Signed(value))
-					} else {
-						Ok(Event::Unsigned(value))
-					}
+		let raw_bytes = self.read_byte_string()?.into_owned();
+		if raw_bytes.len() == 0 {
+			return Ok(Event::Unsigned(0));
+		}
+		let starting_idx = {
+			let mut starting_idx = raw_bytes.len() - 1;
+			for (idx, &byte) in raw_bytes.iter().enumerate() {
+				if byte != 0 {
+					starting_idx = idx;
+					break;
 				}
 			}
-			#[cfg(feature = "num-bigint")]
-			BignumStyle::Num => todo!(),
+			starting_idx
+		};
+		let real_bytes = &raw_bytes[starting_idx..];
+
+		let number = match real_bytes.len() {
+			0 => 0,
+			1 => real_bytes[0] as u64,
+			2 => read_be_u16(real_bytes) as u64,
+			4 => read_be_u32(real_bytes) as u64,
+			8 => read_be_u64(real_bytes) as u64,
+			3 | 5 | 6 | 7 => {
+				let mut value = 0u64;
+				for byte in real_bytes.iter() {
+					value <<= 8;
+					value += *byte as u64;
+				}
+				value
+			}
+			_ => match self.config.bignum_style {
+				BignumStyle::Convert => {
+					// this converts unknown-length byte strings to known-length ones, but oh well
+					self.queue
+						.push_back(Event::ByteString(Cow::Owned(raw_bytes)));
+					return Ok(Event::UnrecognizedTag(if is_negative { 3 } else { 2 }));
+				}
+				BignumStyle::ForceConvert => return Err(DecodeError::OversizedBignum),
+				#[cfg(feature = "num-bigint")]
+				BignumStyle::Num => todo!(),
+			},
+		};
+
+		if is_negative {
+			Ok(Event::Signed(number))
+		} else {
+			Ok(Event::Unsigned(number))
 		}
 	}
 
@@ -593,6 +598,10 @@ mod test {
 			decoder.next_event().unwrap(),
 			Event::ByteString(Cow::Borrowed(b"1234567890"))
 		);
+		assert!(matches!(
+			decoder.next_event(),
+			Err(DecodeError::Insufficient)
+		)); // to make sure the queue works
 	}
 
 	#[test]
