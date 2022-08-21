@@ -233,7 +233,6 @@ impl<T: Read> Decoder<T> {
 	}
 
 	fn do_bignum(&mut self, is_negative: bool) -> Result<Event, DecodeError> {
-		use crate::read_ints::*;
 		use BignumDecodeStyle as BignumStyle;
 
 		let raw_bytes = self.read_byte_string()?.into_owned();
@@ -254,11 +253,7 @@ impl<T: Read> Decoder<T> {
 
 		let number = match real_bytes.len() {
 			0 => 0,
-			1 => real_bytes[0] as u64,
-			2 => read_be_u16(real_bytes) as u64,
-			4 => read_be_u32(real_bytes) as u64,
-			8 => read_be_u64(real_bytes) as u64,
-			3 | 5 | 6 | 7 => {
+			1..=7 => {
 				let mut value = 0u64;
 				for byte in real_bytes.iter() {
 					value <<= 8;
