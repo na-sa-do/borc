@@ -22,7 +22,7 @@ use std::{
 #[cfg(feature = "chrono")]
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 #[cfg(feature = "num-bigint")]
-use num_bigint::BigInt;
+use num_bigint::{BigInt, ToBigInt};
 
 /// An event encountered while decoding or encoding CBOR using a streaming extended implementation.
 #[derive(Debug, Clone, PartialEq)]
@@ -84,7 +84,7 @@ pub enum Event<'a> {
 	/// A non-negative bignum.
 	///
 	/// This corresponds to tags 2 and 3,
-	/// and only appears if the [`Decoder::bignum_style`] extension is set to [`Num`](`BignumDecodeStyle::Num`) or [`ForceNum`](`BignumDecodeStyle::ForceNum`).
+	/// and only appears if the [`Decoder::bignum_style`] extension is set to [`Num`](`BignumDecodeStyle::Num`).
 	#[cfg(feature = "num-bigint")]
 	NumBigInt(BigInt),
 }
@@ -233,6 +233,8 @@ impl<T: Read> Decoder<T> {
 	}
 
 	fn do_bignum(&mut self, is_negative: bool) -> Result<Event, DecodeError> {
+		#[cfg(feature = "num-bigint")]
+		use num_bigint::Sign;
 		use BignumDecodeStyle as BignumStyle;
 
 		let raw_bytes = self.read_byte_string()?.into_owned();
@@ -270,7 +272,15 @@ impl<T: Read> Decoder<T> {
 				}
 				BignumStyle::ForceConvert => return Err(DecodeError::OversizedBignum),
 				#[cfg(feature = "num-bigint")]
-				BignumStyle::Num => todo!(),
+				BignumStyle::Num => {
+					return Ok(Event::NumBigInt(match is_negative {
+						false => BigInt::from_bytes_be(Sign::Plus, real_bytes),
+						true => {
+							(-1).to_bigint().unwrap()
+								- BigInt::from_bytes_be(Sign::Plus, real_bytes)
+						}
+					}))
+				}
 			},
 		};
 
@@ -607,5 +617,27 @@ mod test {
 			Err(DecodeError::OversizedBignum) => (),
 			other => panic!("got {other:?}"),
 		}
+	}
+
+	#[cfg(feature = "num-bigint")]
+	#[test]
+	fn decode_bignum_num() {
+		use num_bigint::{Sign, ToBigInt};
+
+		let mut decoder = Decoder::new(Cursor::new(b"\xC2\x4A1234567890"));
+		decoder.set_bignum_style(BignumDecodeStyle::Num);
+		assert_eq!(
+			decoder.next_event().unwrap(),
+			Event::NumBigInt(BigInt::from_bytes_be(num_bigint::Sign::Plus, b"1234567890"))
+		);
+
+		let mut decoder = Decoder::new(Cursor::new(b"\xC3\x4A1234567890"));
+		decoder.set_bignum_style(BignumDecodeStyle::Num);
+		assert_eq!(
+			decoder.next_event().unwrap(),
+			Event::NumBigInt(
+				(-1).to_bigint().unwrap() - BigInt::from_bytes_be(Sign::Plus, b"1234567890")
+			)
+		);
 	}
 }
