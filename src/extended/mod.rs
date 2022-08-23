@@ -3,8 +3,9 @@
 //! This module itself contains extension configuration types.
 //! The CBOR encoder and decoder are in [`streaming`], like the [`basic`](`crate::basic`) API.
 //!
-//! At the moment, one extension is implemented:
-//! dates and times using the `chrono` crate (requires the `chrono` feature).
+//! At the moment, the following extensions are implemented:
+//! - dates and times using the `chrono` crate (requires the `chrono` feature)
+//! - bignums using the `num-bigint` crate (requires the `num-bigint` feature)
 //!
 //! (We can't link to other crates here if they may or may not be compiled in, because if they aren't rustdoc gets confused.)
 
@@ -29,7 +30,7 @@ macro_rules! config_accessors {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct DecodeExtensionConfig {
+pub(crate) struct DecodeExtensionConfig {
 	date_time_style: DateTimeDecodeStyle,
 	bignum_style: BignumDecodeStyle,
 }
@@ -53,7 +54,7 @@ impl DecodeExtensionConfig {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct EncodeExtensionConfig {
+pub(crate) struct EncodeExtensionConfig {
 	date_time_style: DateTimeEncodeStyle,
 }
 
