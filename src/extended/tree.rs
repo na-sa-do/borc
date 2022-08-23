@@ -7,11 +7,14 @@
 
 use super::{
 	streaming::{Decoder as StreamingDecoder, Encoder as StreamingEncoder, Event},
-	DateTimeDecodeStyle, DateTimeEncodeStyle, DecodeExtensionConfig, EncodeExtensionConfig,
+	BignumDecodeStyle, DateTimeDecodeStyle, DateTimeEncodeStyle, DecodeExtensionConfig,
+	EncodeExtensionConfig,
 };
 use crate::errors::{DecodeError, EncodeError};
 #[cfg(feature = "chrono")]
 use chrono::{DateTime, FixedOffset};
+#[cfg(feature = "num-bigint")]
+use num_bigint::BigInt;
 use std::{
 	borrow::Cow,
 	io::{Read, Write},
@@ -50,9 +53,15 @@ pub enum Item {
 	/// A date/time.
 	///
 	/// This corresponds to tags 0 and 1.
-	///  and only appears if the [`Decoder::date_time_style`] extension is set to [`Chrono`](`DateTimeDecodeStyle::Chrono`).
+	/// and only appears if the [`Decoder::date_time_style`] extension is set to [`Chrono`](`DateTimeDecodeStyle::Chrono`).
 	#[cfg(feature = "chrono")]
 	ChronoDateTime(DateTime<FixedOffset>),
+	/// A bignum.
+	///
+	/// This corresponds to tags 2 and 3,
+	/// and only appears if the [`Decoder::bignum_style`] extension is set to [`Num`](`BignumDecodeStyle::Num`).
+	#[cfg(feature = "num-bigint")]
+	NumBigInt(BigInt),
 }
 
 impl Item {
@@ -122,6 +131,14 @@ impl Decoder {
 		date_time_style_mut,
 		set_date_time_style,
 		"the way date-times are decoded."
+	);
+
+	forward_config_accessors!(
+		BignumDecodeStyle,
+		bignum_style,
+		bignum_style_mut,
+		set_bignum_style,
+		"the way bignums are decoded."
 	);
 
 	/// Parse some CBOR.
@@ -220,7 +237,7 @@ impl Decoder {
 			#[cfg(feature = "chrono")]
 			Event::ChronoDateTime(dt) => Item::ChronoDateTime(dt),
 			#[cfg(feature = "num-bigint")]
-			Event::NumBigInt(_) => todo!(),
+			Event::NumBigInt(n) => Item::NumBigInt(n),
 		}))
 	}
 }
@@ -292,6 +309,8 @@ impl Encoder {
 
 			#[cfg(feature = "chrono")]
 			Item::ChronoDateTime(dt) => encoder.feed_event(Event::ChronoDateTime(*dt)),
+			#[cfg(feature = "num-bigint")]
+			Item::NumBigInt(n) => encoder.feed_event(Event::NumBigInt(n.clone())),
 		}
 	}
 }
