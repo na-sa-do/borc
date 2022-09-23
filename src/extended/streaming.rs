@@ -22,7 +22,7 @@ use std::{
 #[cfg(feature = "chrono")]
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 #[cfg(feature = "num-bigint")]
-use num_bigint::{BigInt, ToBigInt};
+use num_bigint::{BigInt, Sign, ToBigInt};
 
 /// An event encountered while decoding or encoding CBOR using a streaming extended implementation.
 #[derive(Debug, Clone, PartialEq)]
@@ -233,8 +233,6 @@ impl<T: Read> Decoder<T> {
 	}
 
 	fn do_bignum(&mut self, is_negative: bool) -> Result<Event, DecodeError> {
-		#[cfg(feature = "num-bigint")]
-		use num_bigint::Sign;
 		use BignumDecodeStyle as BignumStyle;
 
 		let raw_bytes = self.read_byte_string()?.into_owned();
@@ -448,7 +446,31 @@ impl<T: Write> Encoder<T> {
 				}
 			},
 			#[cfg(feature = "num-bigint")]
-			Event::NumBigInt(_) => todo!(),
+			Event::NumBigInt(mut n) => {
+				if n == BigInt::from(0i32) {
+					BasicEvent::Unsigned(0)
+				} else if BigInt::from(0i32) < n && n <= BigInt::from(u64::MAX) {
+					BasicEvent::Unsigned(n.try_into().unwrap())
+				} else if -BigInt::from(u64::MAX) - 1i32 <= n && n < BigInt::from(0) {
+					let value = if cfg!(debug_assertions) {
+						let digits = (n + 1i32).magnitude().iter_u64_digits().collect::<Vec<_>>();
+						assert!(digits.len() <= 1);
+						digits.get(0).map(|x| *x).unwrap_or(0)
+					} else {
+						n.magnitude().iter_u64_digits().next().unwrap() - 1
+					};
+					BasicEvent::Signed(value)
+				} else {
+					self.dest
+						.feed_event(BasicEvent::Tag(if n.sign() == Sign::Minus {
+							n = n.magnitude().to_bigint().unwrap() - 1;
+							3
+						} else {
+							2
+						}))?;
+					BasicEvent::ByteString(Cow::Owned(n.to_bytes_be().1))
+				}
+			}
 		};
 		self.dest.feed_event(basic_event)
 	}
@@ -639,5 +661,54 @@ mod test {
 				(-1).to_bigint().unwrap() - BigInt::from_bytes_be(Sign::Plus, b"1234567890")
 			)
 		);
+	}
+
+	#[cfg(feature = "num-bigint")]
+	#[test]
+	fn encode_bignum_num() {
+		let mut buf = Vec::new();
+		let mut encoder = Encoder::new(Cursor::new(&mut buf));
+		encoder
+			.feed_event(Event::NumBigInt(BigInt::from(0i32)))
+			.unwrap();
+		assert!(encoder.ready_to_finish());
+		drop(encoder);
+		assert_eq!(buf, b"\0");
+
+		buf.clear();
+		let mut encoder = Encoder::new(Cursor::new(&mut buf));
+		encoder
+			.feed_event(Event::NumBigInt(BigInt::from(u64::MAX) + 1))
+			.unwrap();
+		assert!(encoder.ready_to_finish());
+		drop(encoder);
+		assert_eq!(buf, b"\xC2\x49\x01\0\0\0\0\0\0\0\0");
+
+		buf.clear();
+		let mut encoder = Encoder::new(Cursor::new(&mut buf));
+		encoder
+			.feed_event(Event::NumBigInt(BigInt::from(-1i32)))
+			.unwrap();
+		assert!(encoder.ready_to_finish());
+		drop(encoder);
+		assert_eq!(buf, b"\x20");
+
+		buf.clear();
+		let mut encoder = Encoder::new(Cursor::new(&mut buf));
+		encoder
+			.feed_event(Event::NumBigInt(-BigInt::from(u64::MAX) - 1))
+			.unwrap();
+		assert!(encoder.ready_to_finish());
+		drop(encoder);
+		assert_eq!(buf, b"\x3B\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF");
+
+		buf.clear();
+		let mut encoder = Encoder::new(Cursor::new(&mut buf));
+		encoder
+			.feed_event(Event::NumBigInt(-BigInt::from(u64::MAX) - 2))
+			.unwrap();
+		assert!(encoder.ready_to_finish());
+		drop(encoder);
+		assert_eq!(buf, b"\xC3\x49\x01\0\0\0\0\0\0\0\0");
 	}
 }
