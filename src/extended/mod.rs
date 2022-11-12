@@ -1,13 +1,15 @@
 //! Implementations of CBOR with extensions.
 //!
 //! This module itself contains extension configuration types.
-//! The CBOR encoder and decoder are in [`streaming`], like the [`basic`](`crate::basic`) API.
+//! The CBOR encoder and decoder are in [`streaming`] and [`tree`], like the [`basic`](`crate::basic`) API.
 //!
 //! At the moment, the following extensions are implemented:
 //! - dates and times using the `chrono` crate (requires the `chrono` feature)
 //! - bignums using the `num-bigint` crate (requires the `num-bigint` feature)
 //!
 //! (We can't link to other crates here if they may or may not be compiled in, because if they aren't rustdoc gets confused.)
+
+// If you edit the list of extensions above, remember to update README.md as well.
 
 pub mod streaming;
 pub mod tree;
